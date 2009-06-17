@@ -3,77 +3,15 @@
 use strict;
 use warnings;
 
-use Test::More tests => 6 * 3 * 240;
+use Test::More tests => 6 * 3 * 274;
 
-sub testcase {
- my ($var, $init, $code, $exp, $use, $global) = @_;
- my $decl = $global ? "our $var; local $var;" : "my $var;";
- my $test = $var =~ /^[@%]/ ? "\\$var" : $var;
- return <<TESTCASE;
-my \@exp = ($exp);
-$decl
-$init
-my \$res = eval {
- local \$SIG{__WARN__} = sub { die join '', 'warn:', \@_ };
- $use
- $code
-};
-if (ref \$exp[0]) {
- like \$@, \$exp[0], \$desc . ' [exception]';
-} else {
- is   \$@, \$exp[0], \$desc . ' [exception]';
-}
-is_deeply \$res, \$exp[1], \$desc . ' [return]';
-is_deeply $test, \$exp[2], \$desc . ' [variable]';
-TESTCASE
-}
+use lib 't/lib';
+use autovivification::TestCases;
 
 while (<DATA>) {
  1 while chomp;
  next unless /#/;
- my @chunks = split /#+/, "$_ ";
- s/^\s+//, s/\s+$// for @chunks;
- my ($init, $code, $exp, $opts) = @chunks;
- (my $var = $init) =~ s/[^\$@%\w].*//;
- $init = $var eq $init ? '' : "$init;";
- my $use;
- if ($opts) {
-  for (split ' ', $opts) {
-   my $no = 1;
-   $no = 0 if s/^([-+])// and $1 eq '-';
-   $use .= ($no ? 'no' : 'use') . " autovivification '$_';"
-  }
- } elsif (defined $opts) {
-  $opts = 'empty';
-  $use  = 'no autovivification;';
- } else {
-  $opts = 'default';
-  $use  = '';
- }
- my @testcases = (
-  [ $var, $init,               $code, $exp, $use, 0 ],
-  [ $var, "use strict; $init", $code, $exp, $use, 1 ],
-  [ $var, "no strict;  $init", $code, $exp, $use, 1 ],
- );
- my @extra;
- for (@testcases) {
-  my $var = $_->[0];
-  if ($var =~ /\$/) {
-   my @new = @$_;
-   $new[0] =~ s/^$/%/;
-   $new[1] =~ s/$var\->/$var/g;
-   $new[2] =~ s/$var\->/$var/g;
-   push @extra, \@new;
-  }
- }
- push @testcases, @extra;
- for (@testcases) {
-  my $testcase = testcase(@$_);
-  my ($var, $init, $code) = @$_;
-  my $desc = do { (my $x = "$var | $init") =~ s,;\s+$,,; $x } . " | $code | $opts";
-  eval $testcase;
-  diag "== This testcase failed to compile ==\n$testcase\n## Reason: $@" if $@;
- }
+ testcase_ok($_, '%');
 }
 
 __DATA__
@@ -86,6 +24,11 @@ $x # $x->{a} # '', undef, undef # +fetch
 $x # $x->{a} # '', undef, { }   # +exists
 $x # $x->{a} # '', undef, { }   # +delete
 $x # $x->{a} # '', undef, { }   # +store
+
+$x # $x->{a} # '', undef, { }   # -fetch
+$x # $x->{a} # '', undef, { }   # +fetch -fetch
+$x # $x->{a} # '', undef, undef # -fetch +fetch
+$x # $x->{a} # '', undef, undef # +fetch -exists
 
 $x # $x->{a} # qr/^Reference vivification forbidden/, undef, undef # +strict +fetch
 $x # $x->{a} # '', undef, { } # +strict +exists
@@ -147,6 +90,45 @@ $x->{a}->{b} = 1 # $x->{c}->{d} # '', undef, { a => { b => 1 }, c => { } }      
 $x->{a}->{b} = 1 # $x->{a}->{b} # '', 1,     { a => { b => 1 } }                # +strict +store
 $x->{a}->{b} = 1 # $x->{a}->{d} # '', undef, { a => { b => 1 } }                # +strict +store
 $x->{a}->{b} = 1 # $x->{c}->{d} # '', undef, { a => { b => 1 }, c => { } }      # +strict +store
+
+--- aliasing ---
+
+$x # 1 for $x->{a}; () # '', undef, { a => undef }
+$x # 1 for $x->{a}; () # '', undef, undef          #
+$x # 1 for $x->{a}; () # '', undef, undef          # +fetch
+$x # 1 for $x->{a}; () # '', undef, { a => undef } # +exists
+$x # 1 for $x->{a}; () # '', undef, { a => undef } # +delete
+$x # 1 for $x->{a}; () # '', undef, { a => undef } # +store
+
+$x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 }
+$x # $_ = 1 for $x->{a}; () # '', undef, undef      #
+$x # $_ = 1 for $x->{a}; () # '', undef, undef      # +fetch
+$x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } # +exists
+$x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } # +delete
+$x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } # +store
+
+$x->{a} = 1 # 1 for $x->{a}; () # '', undef, { a => 1 }             # +fetch
+$x->{a} = 1 # 1 for $x->{b}; () # '', undef, { a => 1, b => undef } # +fetch
+$x->{a} = 1 # 1 for $x->{a}; () # '', undef, { a => 1 }             # +exists
+$x->{a} = 1 # 1 for $x->{b}; () # '', undef, { a => 1, b => undef } # +exists
+$x->{a} = 1 # 1 for $x->{a}; () # '', undef, { a => 1 }             # +delete
+$x->{a} = 1 # 1 for $x->{b}; () # '', undef, { a => 1, b => undef } # +delete
+$x->{a} = 1 # 1 for $x->{a}; () # '', undef, { a => 1 }             # +store
+$x->{a} = 1 # 1 for $x->{b}; () # '', undef, { a => 1, b => undef } # +store
+
+--- dereferencing ---
+
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef #
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +fetch
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +exists
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +delete
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +store
+
+$x->{a} = 1 # my @a = %$x; () # '', undef, { a => 1 } # +fetch
+$x->{a} = 1 # my @a = %$x; () # '', undef, { a => 1 } # +exists
+$x->{a} = 1 # my @a = %$x; () # '', undef, { a => 1 } # +delete
+$x->{a} = 1 # my @a = %$x; () # '', undef, { a => 1 } # +store
 
 --- exists ---
 

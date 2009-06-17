@@ -37,10 +37,12 @@ while (<$hash_t>) {
   $in_data = 1;
   print $array_t $_;
  } elsif (!$in_data) {
-  s{s/\^\$/%/}{s/^\$/@/};
+  s{'%'}{'\@'};
   print $array_t $_;
  } else {
+  s!(\ba\b)?(\s*)HASH\b!($1 ? 'an': '') . "$2ARRAY"!eg;
   s!->{([a-z])}!'->[' . num($1) . ']'!eg;
+  s!%(\{?)\$!\@$1\$!g;
   my $buf;
   my $suffix = $_;
   my ($bracket, $prefix);
@@ -49,6 +51,7 @@ while (<$hash_t>) {
   }
   $buf .= $suffix;
   $buf =~ s/\s+/ /g;
+  $buf =~ s/\s+$//;
   print $array_t "$buf\n";
  }
 }

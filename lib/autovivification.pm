@@ -11,13 +11,13 @@ autovivification - Lexically disable autovivification.
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.01';
+ $VERSION = '0.02';
 }
 
 =head1 SYNOPSIS
@@ -64,8 +64,8 @@ Enables the features given in C<@opts>, which can be :
 
 C<'fetch'>
 
-Turn off autovivification for rvalue dereferencing expressions, such as C<< $value = $hashref->{key}[$idx]{$field} >>.
-C<undef> is returned when the expression would have autovivified.
+Turn off autovivification for rvalue dereferencing expressions, such as C<< $value = $hashref->{key}[$idx]{$field} >>, C<< keys %{$hashref->{key}} >> or C<< values %{$hashref->{key}} >>.
+When the expression would have autovivified, C<undef> is returned for a plain fetch, while C<keys> and C<values> return C<0> in scalar context and the empty list in list context.
 
 =item *
 

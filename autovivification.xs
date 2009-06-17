@@ -176,17 +176,26 @@ STATIC const a_op_info *a_map_fetch(const OP *o, a_op_info *oi) {
 #endif
 
  val = ptable_fetch(a_op_map, o);
- if (val) {
-  *oi = *val;
-  val = oi;
- } else
-  oi->old_pp = 0;
+ *oi = *val;
 
 #ifdef USE_ITHREADS
  MUTEX_UNLOCK(&a_op_map_mutex);
 #endif
 
  return val;
+}
+
+STATIC void a_map_delete(pTHX_ const OP *o) {
+#define a_map_delete(O) a_map_delete(aTHX_ (O))
+#ifdef USE_ITHREADS
+ MUTEX_LOCK(&a_op_map_mutex);
+#endif
+
+ ptable_map_store(a_op_map, o, NULL);
+
+#ifdef USE_ITHREADS
+ MUTEX_UNLOCK(&a_op_map_mutex);
+#endif
 }
 
 STATIC void a_map_set_root(const OP *root, UV flags) {
@@ -204,12 +213,28 @@ STATIC void a_map_set_root(const OP *root, UV flags) {
   }
   if (!(o->op_flags & OPf_KIDS))
    break;
-  o = cUNOPo->op_first;
+  switch (PL_opargs[o->op_type] & OA_CLASS_MASK) {
+   case OA_BASEOP:
+   case OA_UNOP:
+   case OA_BINOP:
+   case OA_BASEOP_OR_UNOP:
+    o = cUNOPo->op_first;
+    break;
+   case OA_LIST:
+   case OA_LISTOP:
+    o = cLISTOPo->op_last;
+    break;
+   default:
+    goto done;
+  }
  }
 
+done:
 #ifdef USE_ITHREADS
  MUTEX_UNLOCK(&a_op_map_mutex);
 #endif
+
+ return;
 }
 
 /* ... Lightweight pp_defined() ............................................ */
@@ -245,15 +270,17 @@ STATIC OP *a_pp_rv2av(pTHX) {
  UV hint;
  dSP;
 
- if (!SvOK(TOPs)) {
+ a_map_fetch(PL_op, &oi);
+
+ if (PL_op != oi.root && !SvOK(TOPs)) {
+  /* We always need to push an empty array to fool the pp_aelem() that comes
+   * later. */
   SV *av;
   POPs;
   av = sv_2mortal((SV *) newAV());
   PUSHs(av);
   RETURN;
  }
-
- a_map_fetch(PL_op, &oi);
 
  return CALL_FPTR(oi.old_pp)(aTHX);
 }
@@ -265,18 +292,22 @@ STATIC OP *a_pp_rv2hv(pTHX) {
  UV hint;
  dSP;
 
- if (!SvOK(TOPs))
-  RETURN;
-
  a_map_fetch(PL_op, &oi);
+
+ if (PL_op != oi.root && !SvOK(TOPs)) {
+  if (oi.root->op_flags & OPf_MOD) {
+   SV *hv;
+   POPs;
+   hv = sv_2mortal((SV *) newHV());
+   PUSHs(hv);
+  }
+  RETURN;
+ }
 
  return CALL_FPTR(oi.old_pp)(aTHX);
 }
 
 /* ... pp_deref (aelem,helem,rv2sv,padsv) .................................. */
-
-STATIC const char a_msg_forbidden[]  = "Reference vivification forbidden";
-STATIC const char a_msg_impossible[] = "Can't vivify reference";
 
 STATIC OP *a_pp_deref(pTHX) {
  a_op_info oi;
@@ -291,9 +322,8 @@ STATIC OP *a_pp_deref(pTHX) {
   U8 old_private;
 
 deref:
-  old_private = PL_op->op_private;
-  PL_op->op_private &= ~OPpDEREF;
-  PL_op->op_private |= OPpLVAL_DEFER;
+  old_private       = PL_op->op_private;
+  PL_op->op_private = ((old_private & ~OPpDEREF) | OPpLVAL_DEFER);
   o = CALL_FPTR(oi.old_pp)(aTHX);
   PL_op->op_private = old_private;
 
@@ -301,11 +331,11 @@ deref:
    SPAGAIN;
    if (!SvOK(TOPs)) {
     if (flags & A_HINT_STRICT)
-     croak(a_msg_forbidden);
+     croak("Reference vivification forbidden");
     else if (flags & A_HINT_WARN)
-      warn(a_msg_forbidden);
+      warn("Reference was vivified");
     else /* A_HINT_STORE */
-     croak(a_msg_impossible);
+     croak("Can't vivify reference");
    }
   }
 
@@ -313,11 +343,11 @@ deref:
  } else if (flags && (PL_op->op_private & OPpDEREF || PL_op == oi.root)) {
   oi.flags = flags & A_HINT_NOTIFY;
 
-  if (oi.root->op_flags & OPf_MOD) {
-   if (flags & A_HINT_STORE)
+  if ((oi.root->op_flags & (OPf_MOD|OPf_REF)) != (OPf_MOD|OPf_REF)) {
+   if (flags & A_HINT_FETCH)
+    oi.flags |= (A_HINT_FETCH|A_HINT_DEREF);
+  } else if (flags & A_HINT_STORE)
     oi.flags |= (A_HINT_STORE|A_HINT_DEREF);
-  } else if (flags & A_HINT_FETCH)
-   oi.flags |= (A_HINT_FETCH|A_HINT_DEREF);
 
   if (PL_op == oi.root)
    oi.flags &= ~A_HINT_DEREF;
@@ -341,9 +371,28 @@ deref:
  return CALL_FPTR(oi.old_pp)(aTHX);
 }
 
-/* ... pp_root (exists,delete) ............................................. */
+/* ... pp_root (exists,delete,keys,values) ................................. */
 
-STATIC OP *a_pp_root(pTHX) {
+STATIC OP *a_pp_root_unop(pTHX) {
+ a_op_info oi;
+ dSP;
+
+ if (!a_defined(TOPs)) {
+  POPs;
+  /* Can only be reached by keys or values */
+  if (GIMME_V == G_SCALAR) {
+   dTARGET;
+   PUSHi(0);
+  }
+  RETURN;
+ }
+
+ a_map_fetch(PL_op, &oi);
+
+ return CALL_FPTR(oi.old_pp)(aTHX);
+}
+
+STATIC OP *a_pp_root_binop(pTHX) {
  a_op_info oi;
  dSP;
 
@@ -408,7 +457,7 @@ STATIC OP *a_ck_padany(pTHX_ OP *o) {
   a_pp_padsv_save();
   a_map_store(o, a_pp_padsv_saved, hint);
  } else
-  a_map_store(o, 0, 0);
+  a_map_delete(o);
 
  return o;
 }
@@ -427,7 +476,7 @@ STATIC OP *a_ck_padsv(pTHX_ OP *o) {
   a_map_store(o, o->op_ppaddr, hint);
   o->op_ppaddr = a_pp_deref;
  } else
-  a_map_store(o, 0, 0);
+  a_map_delete(o);
 
  return o;
 }
@@ -451,57 +500,91 @@ STATIC OP *a_ck_deref(pTHX_ OP *o) {
 
  hint = a_hint();
  if (hint & A_HINT_DO) {
-  if (!(hint & A_HINT_STRICT) && o->op_flags & OPf_KIDS) {
-   OP *kid = cUNOPo->op_first;
-   switch (kid->op_type) {
-    case OP_RV2AV:
-     a_map_store(kid, kid->op_ppaddr, hint);
-     kid->op_ppaddr = a_pp_rv2av;
-     break;
-    case OP_RV2HV:
-     a_map_store(kid, kid->op_ppaddr, hint);
-     kid->op_ppaddr = a_pp_rv2hv;
-     break;
-   }
-  }
   a_map_store(o, o->op_ppaddr, hint);
   o->op_ppaddr = a_pp_deref;
   a_map_set_root(o, hint);
  } else
-  a_map_store(o, 0, 0);
+  a_map_delete(o);
 
  return o;
 }
 
-/* ... ck_root (exists,delete) ............................................. */
+/* ... ck_rv2xv (rv2av,rv2hv) .............................................. */
+
+STATIC OP *(*a_old_ck_rv2av)(pTHX_ OP *) = 0;
+STATIC OP *(*a_old_ck_rv2hv)(pTHX_ OP *) = 0;
+
+STATIC OP *a_ck_rv2xv(pTHX_ OP *o) {
+ OP * (*old_ck)(pTHX_ OP *o) = 0;
+ OP * (*new_pp)(pTHX)        = 0;
+ UV hint;
+
+ switch (o->op_type) {
+  case OP_RV2AV: old_ck = a_old_ck_rv2av; new_pp = a_pp_rv2av; break;
+  case OP_RV2HV: old_ck = a_old_ck_rv2hv; new_pp = a_pp_rv2hv; break;
+ }
+ o = CALL_FPTR(old_ck)(aTHX_ o);
+
+ hint = a_hint();
+ if (hint & A_HINT_DO) {
+  if (!(hint & A_HINT_STRICT)) {
+   a_map_store(o, o->op_ppaddr, hint);
+   o->op_ppaddr = new_pp;
+  }
+  a_map_set_root(o, hint);
+ } else
+  a_map_delete(o);
+
+ return o;
+}
+
+/* ... ck_root (exists,delete,keys,values) ................................. */
 
 STATIC OP *(*a_old_ck_exists)(pTHX_ OP *) = 0;
 STATIC OP *(*a_old_ck_delete)(pTHX_ OP *) = 0;
+STATIC OP *(*a_old_ck_keys)  (pTHX_ OP *) = 0;
+STATIC OP *(*a_old_ck_values)(pTHX_ OP *) = 0;
 
 STATIC OP *a_ck_root(pTHX_ OP *o) {
  OP * (*old_ck)(pTHX_ OP *o) = 0;
+ OP * (*new_pp)(pTHX)        = 0;
  bool enabled = FALSE;
  UV hint = a_hint();
 
  switch (o->op_type) {
   case OP_EXISTS:
    old_ck  = a_old_ck_exists;
+   new_pp  = a_pp_root_binop;
    enabled = hint & A_HINT_EXISTS;
    break;
   case OP_DELETE:
    old_ck  = a_old_ck_delete;
+   new_pp  = a_pp_root_binop;
    enabled = hint & A_HINT_DELETE;
+   break;
+  case OP_KEYS:
+   old_ck  = a_old_ck_keys;
+   new_pp  = a_pp_root_unop;
+   enabled = hint & A_HINT_FETCH;
+   break;
+  case OP_VALUES:
+   old_ck  = a_old_ck_values;
+   new_pp  = a_pp_root_unop;
+   enabled = hint & A_HINT_FETCH;
    break;
  }
  o = CALL_FPTR(old_ck)(aTHX_ o);
 
- if (enabled) {
-  a_map_set_root(o, hint | A_HINT_DEREF);
-  a_map_store(o, o->op_ppaddr, hint);
-  o->op_ppaddr = a_pp_root;
- } else {
-  a_map_set_root(o, 0);
- }
+ if (hint & A_HINT_DO) {
+  if (enabled) {
+   a_map_set_root(o, hint | A_HINT_DEREF);
+   a_map_store(o, o->op_ppaddr, hint);
+   o->op_ppaddr = new_pp;
+  } else {
+   a_map_set_root(o, 0);
+  }
+ } else
+  a_map_delete(o);
 
  return o;
 }
@@ -530,16 +613,27 @@ BOOT:
   PL_check[OP_PADANY] = MEMBER_TO_FPTR(a_ck_padany);
   a_old_ck_padsv      = PL_check[OP_PADSV];
   PL_check[OP_PADSV]  = MEMBER_TO_FPTR(a_ck_padsv);
+
   a_old_ck_aelem      = PL_check[OP_AELEM];
   PL_check[OP_AELEM]  = MEMBER_TO_FPTR(a_ck_deref);
   a_old_ck_helem      = PL_check[OP_HELEM];
   PL_check[OP_HELEM]  = MEMBER_TO_FPTR(a_ck_deref);
   a_old_ck_rv2sv      = PL_check[OP_RV2SV];
   PL_check[OP_RV2SV]  = MEMBER_TO_FPTR(a_ck_deref);
+
+  a_old_ck_rv2av      = PL_check[OP_RV2AV];
+  PL_check[OP_RV2AV]  = MEMBER_TO_FPTR(a_ck_rv2xv);
+  a_old_ck_rv2hv      = PL_check[OP_RV2HV];
+  PL_check[OP_RV2HV]  = MEMBER_TO_FPTR(a_ck_rv2xv);
+
   a_old_ck_exists     = PL_check[OP_EXISTS];
   PL_check[OP_EXISTS] = MEMBER_TO_FPTR(a_ck_root);
   a_old_ck_delete     = PL_check[OP_DELETE];
   PL_check[OP_DELETE] = MEMBER_TO_FPTR(a_ck_root);
+  a_old_ck_keys       = PL_check[OP_KEYS];
+  PL_check[OP_KEYS]   = MEMBER_TO_FPTR(a_ck_root);
+  a_old_ck_values     = PL_check[OP_VALUES];
+  PL_check[OP_VALUES] = MEMBER_TO_FPTR(a_ck_root);
 
   stash = gv_stashpvn(__PACKAGE__, __PACKAGE_LEN__, 1);
   newCONSTSUB(stash, "A_HINT_STRICT", newSVuv(A_HINT_STRICT));
