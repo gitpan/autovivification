@@ -12,11 +12,13 @@ sub import {
 
 sub in_strict { (caller 0)[8] & (eval { strict::bits(@_) } || 0) };
 
-sub source {
- my ($var, $init, $code, $exp, $use, $global) = @_;
+sub generate {
+ my ($var, $init, $code, $exp, $use, $opts, $global) = @_;
  my $decl = $global ? "our $var; local $var;" : "my $var;";
  my $test = $var =~ /^[@%]/ ? "\\$var" : $var;
- return <<TESTCASE;
+ my $desc = join('; ', map { my $x = $_; $x=~ s,;\s*$,,; $x }
+                                   grep /\S/, $decl, $init, $code) . " <$opts>";
+ return <<TESTCASE, $desc;
 $decl
 $init
 my \$strict = autovivification::TestCases::in_strict('refs');
@@ -58,27 +60,42 @@ sub testcase_ok {
   $opts = 'default';
   $use  = '';
  }
- my @testcases = (
-  [ $var, $init,               $code, $exp, $use, 0 ],
-  [ $var, "use strict; $init", $code, $exp, $use, 1 ],
-  [ $var, "no strict;  $init", $code, $exp, $use, 1 ],
- );
- my @extra;
- for (@testcases) {
-  my $var = $_->[0];
-  if ($var =~ /\$/) {
-   my @new = @$_;
-   $new[0] =~ s/^$/$sigil/;
-   $new[1] =~ s/$var\->/$var/g;
-   $new[2] =~ s/$var\->/$var/g;
-   push @extra, \@new;
+ my @base = ([ $var, $init, $code, $exp, $use ]);
+ if ($var =~ /\$/) {
+  my @oldderef = @{$base[0]};
+  $oldderef[2] =~ s/\Q$var\E\->/\$$var/g;
+  push @base, \@oldderef;
+
+  my @nonref = @{$base[0]};
+  $nonref[0] =~ s/^\$/$sigil/;
+  for ($nonref[1], $nonref[2]) {
+   s/\Q$sigil$var\E/$nonref[0]/g;
+   s/\Q$var\E\->/$var/g;
   }
+  my $simple      = $nonref[2] !~ /->/;
+  my $plain_deref = $nonref[2] =~ /\Q$nonref[0]\E/;
+  my $empty  = { '@' => '[ ]', '%' => '{ }' }->{$sigil};
+  if (($simple
+       and (   $nonref[3] =~ m!qr/\^Reference vivification forbidden.*?/!
+            or $nonref[3] =~ m!qr/\^Can't vivify reference.*?/!))
+  or ($plain_deref
+       and $nonref[3] =~ m!qr/\^Can't use an undefined value as a.*?/!)) {
+   $nonref[1] = '';
+   $nonref[2] = 1;
+   $nonref[3] = "'', 1, $empty";
+  }
+  $nonref[3] =~ s/,\s*undef\s*$/, $empty/;
+  push @base, \@nonref;
  }
- push @testcases, @extra;
+ my @testcases = map {
+  my ($var, $init, $code, $exp, $use) = @$_;
+  [ $var, $init,               $code, $exp, $use, $opts, 0 ],
+  [ $var, "use strict; $init", $code, $exp, $use, $opts, 1 ],
+  [ $var, "no strict;  $init", $code, $exp, $use, $opts, 1 ],
+ } @base;
  for (@testcases) {
-  my $testcase = source(@$_);
-  my ($var, $init, $code) = @$_;
-  my $desc = do { (my $x = "$var | $init") =~ s,;\s+$,,; $x } . " | $code | $opts";
+  my ($testcase, $desc) = generate(@$_);
+  my @N = (0 .. 9);
   eval $testcase;
   diag "== This testcase failed to compile ==\n$testcase\n## Reason: $@" if $@;
  }

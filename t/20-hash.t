@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => 6 * 3 * 274;
+use Test::More tests => 9 * 3 * 274;
 
 use lib 't/lib';
 use autovivification::TestCases;
@@ -94,18 +94,18 @@ $x->{a}->{b} = 1 # $x->{c}->{d} # '', undef, { a => { b => 1 }, c => { } }      
 --- aliasing ---
 
 $x # 1 for $x->{a}; () # '', undef, { a => undef }
-$x # 1 for $x->{a}; () # '', undef, undef          #
-$x # 1 for $x->{a}; () # '', undef, undef          # +fetch
+$x # 1 for $x->{a}; () # '', undef, { a => undef } #
+$x # 1 for $x->{a}; () # '', undef, { a => undef } # +fetch
 $x # 1 for $x->{a}; () # '', undef, { a => undef } # +exists
 $x # 1 for $x->{a}; () # '', undef, { a => undef } # +delete
-$x # 1 for $x->{a}; () # '', undef, { a => undef } # +store
+$x # 1 for $x->{a}; () # qr/^Can't vivify reference/, undef, undef # +store
 
 $x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 }
-$x # $_ = 1 for $x->{a}; () # '', undef, undef      #
-$x # $_ = 1 for $x->{a}; () # '', undef, undef      # +fetch
+$x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } #
+$x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } # +fetch
 $x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } # +exists
 $x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } # +delete
-$x # $_ = 1 for $x->{a}; () # '', undef, { a => 1 } # +store
+$x # $_ = 1 for $x->{a}; () # qr/^Can't vivify reference/, undef, undef # +store
 
 $x->{a} = 1 # 1 for $x->{a}; () # '', undef, { a => 1 }             # +fetch
 $x->{a} = 1 # 1 for $x->{b}; () # '', undef, { a => 1, b => undef } # +fetch
@@ -118,12 +118,12 @@ $x->{a} = 1 # 1 for $x->{b}; () # '', undef, { a => 1, b => undef } # +store
 
 --- dereferencing ---
 
-$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef
-$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef #
-$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +fetch
-$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +exists
-$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +delete
-$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/Can't use an undefined value as a HASH reference/ : ''), undef, undef # +store
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/^Can't use an undefined value as a HASH reference/ : ''), undef, undef
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/^Can't use an undefined value as a HASH reference/ : ''), undef, undef #
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/^Can't use an undefined value as a HASH reference/ : ''), undef, undef # +fetch
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/^Can't use an undefined value as a HASH reference/ : ''), undef, undef # +exists
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/^Can't use an undefined value as a HASH reference/ : ''), undef, undef # +delete
+$x # no warnings 'uninitialized'; my @a = %$x; () # ($strict ? qr/^Can't use an undefined value as a HASH reference/ : ''), undef, undef # +store
 
 $x->{a} = 1 # my @a = %$x; () # '', undef, { a => 1 } # +fetch
 $x->{a} = 1 # my @a = %$x; () # '', undef, { a => 1 } # +exists

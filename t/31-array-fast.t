@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => 6 * 3 * 274;
+use Test::More tests => 9 * 3 * 274;
 
 use lib 't/lib';
 use autovivification::TestCases;
@@ -94,18 +94,18 @@ $x->[0]->[1] = 1 # $x->[2]->[3] # '', undef, [ [ undef, 1 ], undef, [ ] ] # +str
 --- aliasing ---
 
 $x # 1 for $x->[0]; () # '', undef, [ undef ]
-$x # 1 for $x->[0]; () # '', undef, undef #
-$x # 1 for $x->[0]; () # '', undef, undef # +fetch
+$x # 1 for $x->[0]; () # '', undef, [ undef ] #
+$x # 1 for $x->[0]; () # '', undef, [ undef ] # +fetch
 $x # 1 for $x->[0]; () # '', undef, [ undef ] # +exists
 $x # 1 for $x->[0]; () # '', undef, [ undef ] # +delete
-$x # 1 for $x->[0]; () # '', undef, [ undef ] # +store
+$x # 1 for $x->[0]; () # qr/^Can't vivify reference/, undef, undef # +store
 
 $x # $_ = 1 for $x->[0]; () # '', undef, [ 1 ]
-$x # $_ = 1 for $x->[0]; () # '', undef, undef #
-$x # $_ = 1 for $x->[0]; () # '', undef, undef # +fetch
+$x # $_ = 1 for $x->[0]; () # '', undef, [ 1 ] #
+$x # $_ = 1 for $x->[0]; () # '', undef, [ 1 ] # +fetch
 $x # $_ = 1 for $x->[0]; () # '', undef, [ 1 ] # +exists
 $x # $_ = 1 for $x->[0]; () # '', undef, [ 1 ] # +delete
-$x # $_ = 1 for $x->[0]; () # '', undef, [ 1 ] # +store
+$x # $_ = 1 for $x->[0]; () # qr/^Can't vivify reference/, undef, undef # +store
 
 $x->[0] = 1 # 1 for $x->[0]; () # '', undef, [ 1 ] # +fetch
 $x->[0] = 1 # 1 for $x->[1]; () # '', undef, [ 1, undef ] # +fetch
@@ -118,12 +118,12 @@ $x->[0] = 1 # 1 for $x->[1]; () # '', undef, [ 1, undef ] # +store
 
 --- dereferencing ---
 
-$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/Can't use an undefined value as an ARRAY reference/ : ''), undef, undef
-$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/Can't use an undefined value as an ARRAY reference/ : ''), undef, undef #
-$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +fetch
-$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +exists
-$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +delete
-$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +store
+$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/^Can't use an undefined value as an ARRAY reference/ : ''), undef, undef
+$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/^Can't use an undefined value as an ARRAY reference/ : ''), undef, undef #
+$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/^Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +fetch
+$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/^Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +exists
+$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/^Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +delete
+$x # no warnings 'uninitialized'; my @a = @$x; () # ($strict ? qr/^Can't use an undefined value as an ARRAY reference/ : ''), undef, undef # +store
 
 $x->[0] = 1 # my @a = @$x; () # '', undef, [ 1 ] # +fetch
 $x->[0] = 1 # my @a = @$x; () # '', undef, [ 1 ] # +exists
