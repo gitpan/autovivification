@@ -11,13 +11,13 @@ autovivification - Lexically disable autovivification.
 
 =head1 VERSION
 
-Version 0.03
+Version 0.04
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.03';
+ $VERSION = '0.04';
 }
 
 =head1 SYNOPSIS
@@ -65,6 +65,7 @@ Enables the features given in C<@opts>, which can be :
 C<'fetch'>
 
 Turn off autovivification for rvalue dereferencing expressions, such as C<< $value = $hashref->{key}[$idx]{$field} >>, C<< keys %{$hashref->{key}} >> or C<< values %{$hashref->{key}} >>.
+Starting from perl C<5.11>, it also covers C<leys> and C<values> on array references.
 When the expression would have autovivified, C<undef> is returned for a plain fetch, while C<keys> and C<values> return C<0> in scalar context and the empty list in list context.
 
 =item *
@@ -150,6 +151,12 @@ sub import {
  ();
 }
 
+=head1 CAVEATS
+
+The pragma doesn't apply when one dereferences the returned value of an array or hash slice, as in C<< @array[$id]->{member} >> or C<< @hash{$key}->{member} >>.
+This syntax is valid Perl, yet it's discouraged as the slice is here useless since the dereferencing enforces scalar context.
+If warnings are turned on, Perl will complain about one-element slices.
+
 =head1 DEPENDENCIES
 
 L<perl> 5.8.
@@ -185,7 +192,7 @@ Matt S. Trout asked for it.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2009 Vincent Pit, all rights reserved.
+Copyright 2009,2010 Vincent Pit, all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 
