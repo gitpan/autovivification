@@ -11,84 +11,253 @@
 
 /* --- Compatibility wrappers ---------------------------------------------- */
 
+#ifndef HvNAME_get
+# define HvNAME_get(H) HvNAME(H)
+#endif
+
+#ifndef HvNAMELEN_get
+# define HvNAMELEN_get(H) strlen(HvNAME_get(H))
+#endif
+
 #define A_HAS_PERL(R, V, S) (PERL_REVISION > (R) || (PERL_REVISION == (R) && (PERL_VERSION > (V) || (PERL_VERSION == (V) && (PERL_SUBVERSION >= (S))))))
+
+#undef ENTERn
+#if defined(ENTER_with_name) && !A_HAS_PERL(5, 11, 4)
+# define ENTERn(N) ENTER_with_name(N)
+#else
+# define ENTERn(N) ENTER
+#endif
+
+#undef LEAVEn
+#if defined(LEAVE_with_name) && !A_HAS_PERL(5, 11, 4)
+# define LEAVEn(N) LEAVE_with_name(N)
+#else
+# define LEAVEn(N) LEAVE
+#endif
 
 #ifndef A_WORKAROUND_REQUIRE_PROPAGATION
 # define A_WORKAROUND_REQUIRE_PROPAGATION !A_HAS_PERL(5, 10, 1)
 #endif
 
+/* ... Thread safety and multiplicity ...................................... */
+
+/* Always safe when the workaround isn't needed */
+#if !A_WORKAROUND_REQUIRE_PROPAGATION
+# undef A_FORKSAFE
+# define A_FORKSAFE 1
+/* Otherwise, safe unless Makefile.PL says it's Win32 */
+#elif !defined(A_FORKSAFE)
+# define A_FORKSAFE 1
+#endif
+
+#ifndef A_MULTIPLICITY
+# if defined(MULTIPLICITY) || defined(PERL_IMPLICIT_CONTEXT)
+#  define A_MULTIPLICITY 1
+# else
+#  define A_MULTIPLICITY 0
+# endif
+#endif
+#if A_MULTIPLICITY && !defined(tTHX)
+# define tTHX PerlInterpreter*
+#endif
+
+#if A_MULTIPLICITY && defined(USE_ITHREADS) && defined(dMY_CXT) && defined(MY_CXT) && defined(START_MY_CXT) && defined(MY_CXT_INIT) && (defined(MY_CXT_CLONE) || defined(dMY_CXT_SV))
+# define A_THREADSAFE 1
+# ifndef MY_CXT_CLONE
+#  define MY_CXT_CLONE \
+    dMY_CXT_SV;                                                      \
+    my_cxt_t *my_cxtp = (my_cxt_t*)SvPVX(newSV(sizeof(my_cxt_t)-1)); \
+    Copy(INT2PTR(my_cxt_t*, SvUV(my_cxt_sv)), my_cxtp, 1, my_cxt_t); \
+    sv_setuv(my_cxt_sv, PTR2UV(my_cxtp))
+# endif
+#else
+# define A_THREADSAFE 0
+# undef  dMY_CXT
+# define dMY_CXT      dNOOP
+# undef  MY_CXT
+# define MY_CXT       a_globaldata
+# undef  START_MY_CXT
+# define START_MY_CXT STATIC my_cxt_t MY_CXT;
+# undef  MY_CXT_INIT
+# define MY_CXT_INIT  NOOP
+# undef  MY_CXT_CLONE
+# define MY_CXT_CLONE NOOP
+#endif
+
 /* --- Helpers ------------------------------------------------------------- */
 
-#if A_WORKAROUND_REQUIRE_PROPAGATION
-
-#define A_ENCODE_UV(B, U)   \
- len = 0;                   \
- while (len < sizeof(UV)) { \
-  (B)[len++] = (U) & 0xFF;  \
-  (U) >>= 8;                \
- }
-
-#define A_DECODE_UV(U, B)        \
- len = sizeof(UV);               \
- while (len > 0)                 \
-  (U) = ((U) << 8) | (B)[--len];
+/* ... Thread-safe hints ................................................... */
 
 #if A_WORKAROUND_REQUIRE_PROPAGATION
-STATIC UV a_require_tag(pTHX) {
-#define a_require_tag() a_require_tag(aTHX)
- const PERL_SI *si;
 
- for (si = PL_curstackinfo; si; si = si->si_prev) {
-  I32 cxix;
+typedef struct {
+ U32 bits;
+ IV  require_tag;
+} a_hint_t;
 
-  for (cxix = si->si_cxix; cxix >= 0; --cxix) {
-   const PERL_CONTEXT *cx = si->si_cxstack + cxix;
+#define A_HINT_FREE(H) PerlMemShared_free(H)
 
-   if (CxTYPE(cx) == CXt_EVAL && cx->blk_eval.old_op_type == OP_REQUIRE)
-    return PTR2UV(cx);
-  }
+#if A_THREADSAFE
+
+#define PTABLE_NAME        ptable_hints
+#define PTABLE_VAL_FREE(V) A_HINT_FREE(V)
+
+#define pPTBL  pTHX
+#define pPTBL_ pTHX_
+#define aPTBL  aTHX
+#define aPTBL_ aTHX_
+
+#include "ptable.h"
+
+#define ptable_hints_store(T, K, V) ptable_hints_store(aTHX_ (T), (K), (V))
+#define ptable_hints_free(T)        ptable_hints_free(aTHX_ (T))
+
+#define MY_CXT_KEY __PACKAGE__ "::_guts" XS_VERSION
+
+typedef struct {
+ ptable *tbl;   /* It really is a ptable_hints */
+ tTHX    owner;
+} my_cxt_t;
+
+START_MY_CXT
+
+STATIC SV *a_clone(pTHX_ SV *sv, tTHX owner) {
+#define a_clone(S, O) a_clone(aTHX_ (S), (O))
+ CLONE_PARAMS  param;
+ AV           *stashes = NULL;
+ SV           *dupsv;
+
+ if (SvTYPE(sv) == SVt_PVHV && HvNAME_get(sv))
+  stashes = newAV();
+
+ param.stashes    = stashes;
+ param.flags      = 0;
+ param.proto_perl = owner;
+
+ dupsv = sv_dup(sv, &param);
+
+ if (stashes) {
+  av_undef(stashes);
+  SvREFCNT_dec(stashes);
  }
 
- return PTR2UV(NULL);
+ return SvREFCNT_inc(dupsv);
 }
-#endif /* A_WORKAROUND_REQUIRE_PROPAGATION */
+
+STATIC void a_ptable_clone(pTHX_ ptable_ent *ent, void *ud_) {
+ my_cxt_t *ud = ud_;
+ a_hint_t *h1 = ent->val;
+ a_hint_t *h2;
+
+ if (ud->owner == aTHX)
+  return;
+
+ h2              = PerlMemShared_malloc(sizeof *h2);
+ h2->bits        = h1->bits;
+ h2->require_tag = PTR2IV(a_clone(INT2PTR(SV *, h1->require_tag), ud->owner));
+
+ ptable_hints_store(ud->tbl, ent->key, h2);
+}
+
+STATIC void a_thread_cleanup(pTHX_ void *);
+
+STATIC void a_thread_cleanup(pTHX_ void *ud) {
+ int *level = ud;
+
+ if (*level) {
+  *level = 0;
+  LEAVE;
+  SAVEDESTRUCTOR_X(a_thread_cleanup, level);
+  ENTER;
+ } else {
+  dMY_CXT;
+  PerlMemShared_free(level);
+  ptable_hints_free(MY_CXT.tbl);
+ }
+}
+
+#endif /* A_THREADSAFE */
+
+STATIC IV a_require_tag(pTHX) {
+#define a_require_tag() a_require_tag(aTHX)
+ const CV *cv, *outside;
+
+ cv = PL_compcv;
+
+ if (!cv) {
+  /* If for some reason the pragma is operational at run-time, try to discover
+   * the current cv in use. */
+  const PERL_SI *si;
+
+  for (si = PL_curstackinfo; si; si = si->si_prev) {
+   I32 cxix;
+
+   for (cxix = si->si_cxix; cxix >= 0; --cxix) {
+    const PERL_CONTEXT *cx = si->si_cxstack + cxix;
+
+    switch (CxTYPE(cx)) {
+     case CXt_SUB:
+     case CXt_FORMAT:
+      /* The propagation workaround is only needed up to 5.10.0 and at that
+       * time format and sub contexts were still identical. And even later the
+       * cv members offsets should have been kept the same. */
+      cv = cx->blk_sub.cv;
+      goto get_enclosing_cv;
+     case CXt_EVAL:
+      cv = cx->blk_eval.cv;
+      goto get_enclosing_cv;
+     default:
+      break;
+    }
+   }
+  }
+
+  cv = PL_main_cv;
+ }
+
+get_enclosing_cv:
+ for (outside = CvOUTSIDE(cv); outside; outside = CvOUTSIDE(cv))
+  cv = outside;
+
+ return PTR2IV(cv);
+}
 
 STATIC SV *a_tag(pTHX_ UV bits) {
 #define a_tag(B) a_tag(aTHX_ (B))
- SV            *hint;
- const PERL_SI *si;
- UV             cxreq;
- unsigned char  buf[sizeof(UV) * 2];
- STRLEN         len;
+ a_hint_t *h;
+ dMY_CXT;
 
- cxreq = a_require_tag();
- A_ENCODE_UV(buf,              cxreq);
- A_ENCODE_UV(buf + sizeof(UV), bits);
- hint = newSVpvn(buf, sizeof buf);
- SvREADONLY_on(hint);
+ h              = PerlMemShared_malloc(sizeof *h);
+ h->bits        = bits;
+ h->require_tag = a_require_tag();
 
- return hint;
+#if A_THREADSAFE
+ /* We only need for the key to be an unique tag for looking up the value later.
+  * Allocated memory provides convenient unique identifiers, so that's why we
+  * use the hint as the key itself. */
+ ptable_hints_store(MY_CXT.tbl, h, h);
+#endif /* A_THREADSAFE */
+
+ return newSViv(PTR2IV(h));
 }
 
 STATIC UV a_detag(pTHX_ const SV *hint) {
 #define a_detag(H) a_detag(aTHX_ (H))
- const PERL_SI *si;
- UV             cxreq = 0, bits = 0;
- unsigned char *buf;
- STRLEN         len;
+ a_hint_t *h;
+ dMY_CXT;
 
- if (!(hint && SvOK(hint)))
+ if (!(hint && SvIOK(hint)))
   return 0;
 
- buf = SvPVX(hint);
+ h = INT2PTR(a_hint_t *, SvIVX(hint));
+#if A_THREADSAFE
+ h = ptable_fetch(MY_CXT.tbl, h);
+#endif /* A_THREADSAFE */
 
- A_DECODE_UV(cxreq, buf);
- if (a_require_tag() != cxreq)
+ if (a_require_tag() != h->require_tag)
   return 0;
 
- A_DECODE_UV(bits,  buf + sizeof(UV));
-
- return bits;
+ return h->bits;
 }
 
 #else /* A_WORKAROUND_REQUIRE_PROPAGATION */
@@ -378,7 +547,9 @@ STATIC bool a_defined(pTHX_ SV *sv) {
     defined = TRUE;
    break;
   default:
-   defined = SvOK(sv);
+   SvGETMAGIC(sv);
+   if (SvOK(sv))
+    defined = TRUE;
  }
 
  return defined;
@@ -403,7 +574,7 @@ STATIC OP *a_pp_rv2av(pTHX) {
  flags = oi.flags;
 
  if (flags & A_HINT_DEREF) {
-  if (!SvOK(TOPs)) {
+  if (!a_defined(TOPs)) {
    /* We always need to push an empty array to fool the pp_aelem() that comes
     * later. */
    SV *av;
@@ -430,7 +601,7 @@ STATIC OP *a_pp_rv2hv_simple(pTHX) {
  flags = oi.flags;
 
  if (flags & A_HINT_DEREF) {
-  if (!SvOK(TOPs))
+  if (!a_defined(TOPs))
    RETURN;
  } else {
   PL_op->op_ppaddr = oi.old_pp;
@@ -448,7 +619,7 @@ STATIC OP *a_pp_rv2hv(pTHX) {
  flags = oi.flags;
 
  if (flags & A_HINT_DEREF) {
-  if (!SvOK(TOPs)) {
+  if (!a_defined(TOPs)) {
    SV *hv;
    POPs;
    hv = sv_2mortal((SV *) newHV());
@@ -484,7 +655,7 @@ deref:
 
   if (flags & (A_HINT_NOTIFY|A_HINT_STORE)) {
    SPAGAIN;
-   if (!SvOK(TOPs)) {
+   if (!a_defined(TOPs)) {
     if (flags & A_HINT_STRICT)
      croak("Reference vivification forbidden");
     else if (flags & A_HINT_WARN)
@@ -802,6 +973,117 @@ STATIC OP *a_ck_root(pTHX_ OP *o) {
 
 STATIC U32 a_initialized = 0;
 
+STATIC void a_teardown(pTHX_ void *root) {
+
+ if (!a_initialized)
+  return;
+
+#if A_MULTIPLICITY
+ if (aTHX != root)
+  return;
+#endif
+
+#if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
+ {
+  dMY_CXT;
+  ptable_hints_free(MY_CXT.tbl);
+ }
+#endif
+
+ PL_check[OP_PADANY] = MEMBER_TO_FPTR(a_old_ck_padany);
+ a_old_ck_padany     = 0;
+ PL_check[OP_PADSV]  = MEMBER_TO_FPTR(a_old_ck_padsv);
+ a_old_ck_padsv      = 0;
+
+ PL_check[OP_AELEM]  = MEMBER_TO_FPTR(a_old_ck_aelem);
+ a_old_ck_aelem      = 0;
+ PL_check[OP_HELEM]  = MEMBER_TO_FPTR(a_old_ck_helem);
+ a_old_ck_helem      = 0;
+ PL_check[OP_RV2SV]  = MEMBER_TO_FPTR(a_old_ck_rv2sv);
+ a_old_ck_rv2sv      = 0;
+
+ PL_check[OP_RV2AV]  = MEMBER_TO_FPTR(a_old_ck_rv2av);
+ a_old_ck_rv2av      = 0;
+ PL_check[OP_RV2HV]  = MEMBER_TO_FPTR(a_old_ck_rv2hv);
+ a_old_ck_rv2hv      = 0;
+
+ PL_check[OP_ASLICE] = MEMBER_TO_FPTR(a_old_ck_aslice);
+ a_old_ck_aslice     = 0;
+ PL_check[OP_HSLICE] = MEMBER_TO_FPTR(a_old_ck_hslice);
+ a_old_ck_hslice     = 0;
+
+ PL_check[OP_EXISTS] = MEMBER_TO_FPTR(a_old_ck_exists);
+ a_old_ck_exists     = 0;
+ PL_check[OP_DELETE] = MEMBER_TO_FPTR(a_old_ck_delete);
+ a_old_ck_delete     = 0;
+ PL_check[OP_KEYS]   = MEMBER_TO_FPTR(a_old_ck_keys);
+ a_old_ck_keys       = 0;
+ PL_check[OP_VALUES] = MEMBER_TO_FPTR(a_old_ck_values);
+ a_old_ck_values     = 0;
+
+ if (a_pp_padsv_saved) {
+  PL_ppaddr[OP_PADSV] = a_pp_padsv_saved;
+  a_pp_padsv_saved    = 0;
+ }
+
+ a_initialized = 0;
+}
+
+STATIC void a_setup(pTHX) {
+#define a_setup() a_setup(aTHX)
+ if (a_initialized)
+  return;
+
+#if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
+ {
+  MY_CXT_INIT;
+  MY_CXT.tbl   = ptable_new();
+  MY_CXT.owner = aTHX;
+ }
+#endif
+
+ a_old_ck_padany     = PL_check[OP_PADANY];
+ PL_check[OP_PADANY] = MEMBER_TO_FPTR(a_ck_padany);
+ a_old_ck_padsv      = PL_check[OP_PADSV];
+ PL_check[OP_PADSV]  = MEMBER_TO_FPTR(a_ck_padsv);
+
+ a_old_ck_aelem      = PL_check[OP_AELEM];
+ PL_check[OP_AELEM]  = MEMBER_TO_FPTR(a_ck_deref);
+ a_old_ck_helem      = PL_check[OP_HELEM];
+ PL_check[OP_HELEM]  = MEMBER_TO_FPTR(a_ck_deref);
+ a_old_ck_rv2sv      = PL_check[OP_RV2SV];
+ PL_check[OP_RV2SV]  = MEMBER_TO_FPTR(a_ck_deref);
+
+ a_old_ck_rv2av      = PL_check[OP_RV2AV];
+ PL_check[OP_RV2AV]  = MEMBER_TO_FPTR(a_ck_rv2xv);
+ a_old_ck_rv2hv      = PL_check[OP_RV2HV];
+ PL_check[OP_RV2HV]  = MEMBER_TO_FPTR(a_ck_rv2xv);
+
+ a_old_ck_aslice     = PL_check[OP_ASLICE];
+ PL_check[OP_ASLICE] = MEMBER_TO_FPTR(a_ck_xslice);
+ a_old_ck_hslice     = PL_check[OP_HSLICE];
+ PL_check[OP_HSLICE] = MEMBER_TO_FPTR(a_ck_xslice);
+
+ a_old_ck_exists     = PL_check[OP_EXISTS];
+ PL_check[OP_EXISTS] = MEMBER_TO_FPTR(a_ck_root);
+ a_old_ck_delete     = PL_check[OP_DELETE];
+ PL_check[OP_DELETE] = MEMBER_TO_FPTR(a_ck_root);
+ a_old_ck_keys       = PL_check[OP_KEYS];
+ PL_check[OP_KEYS]   = MEMBER_TO_FPTR(a_ck_root);
+ a_old_ck_values     = PL_check[OP_VALUES];
+ PL_check[OP_VALUES] = MEMBER_TO_FPTR(a_ck_root);
+
+#if A_MULTIPLICITY
+ call_atexit(a_teardown, aTHX);
+#else
+ call_atexit(a_teardown, NULL);
+#endif
+
+ a_initialized = 1;
+}
+
+STATIC U32 a_booted = 0;
+
 /* --- XS ------------------------------------------------------------------ */
 
 MODULE = autovivification      PACKAGE = autovivification
@@ -810,7 +1092,7 @@ PROTOTYPES: ENABLE
 
 BOOT: 
 {                                    
- if (!a_initialized++) {
+ if (!a_booted++) {
   HV *stash;
 
   a_op_map = ptable_new();
@@ -820,37 +1102,6 @@ BOOT:
 
   PERL_HASH(a_hash, __PACKAGE__, __PACKAGE_LEN__);
 
-  a_old_ck_padany     = PL_check[OP_PADANY];
-  PL_check[OP_PADANY] = MEMBER_TO_FPTR(a_ck_padany);
-  a_old_ck_padsv      = PL_check[OP_PADSV];
-  PL_check[OP_PADSV]  = MEMBER_TO_FPTR(a_ck_padsv);
-
-  a_old_ck_aelem      = PL_check[OP_AELEM];
-  PL_check[OP_AELEM]  = MEMBER_TO_FPTR(a_ck_deref);
-  a_old_ck_helem      = PL_check[OP_HELEM];
-  PL_check[OP_HELEM]  = MEMBER_TO_FPTR(a_ck_deref);
-  a_old_ck_rv2sv      = PL_check[OP_RV2SV];
-  PL_check[OP_RV2SV]  = MEMBER_TO_FPTR(a_ck_deref);
-
-  a_old_ck_rv2av      = PL_check[OP_RV2AV];
-  PL_check[OP_RV2AV]  = MEMBER_TO_FPTR(a_ck_rv2xv);
-  a_old_ck_rv2hv      = PL_check[OP_RV2HV];
-  PL_check[OP_RV2HV]  = MEMBER_TO_FPTR(a_ck_rv2xv);
-
-  a_old_ck_aslice     = PL_check[OP_ASLICE];
-  PL_check[OP_ASLICE] = MEMBER_TO_FPTR(a_ck_xslice);
-  a_old_ck_hslice     = PL_check[OP_HSLICE];
-  PL_check[OP_HSLICE] = MEMBER_TO_FPTR(a_ck_xslice);
-
-  a_old_ck_exists     = PL_check[OP_EXISTS];
-  PL_check[OP_EXISTS] = MEMBER_TO_FPTR(a_ck_root);
-  a_old_ck_delete     = PL_check[OP_DELETE];
-  PL_check[OP_DELETE] = MEMBER_TO_FPTR(a_ck_root);
-  a_old_ck_keys       = PL_check[OP_KEYS];
-  PL_check[OP_KEYS]   = MEMBER_TO_FPTR(a_ck_root);
-  a_old_ck_values     = PL_check[OP_VALUES];
-  PL_check[OP_VALUES] = MEMBER_TO_FPTR(a_ck_root);
-
   stash = gv_stashpvn(__PACKAGE__, __PACKAGE_LEN__, 1);
   newCONSTSUB(stash, "A_HINT_STRICT", newSVuv(A_HINT_STRICT));
   newCONSTSUB(stash, "A_HINT_WARN",   newSVuv(A_HINT_WARN));
@@ -859,8 +1110,43 @@ BOOT:
   newCONSTSUB(stash, "A_HINT_EXISTS", newSVuv(A_HINT_EXISTS));
   newCONSTSUB(stash, "A_HINT_DELETE", newSVuv(A_HINT_DELETE));
   newCONSTSUB(stash, "A_HINT_MASK",   newSVuv(A_HINT_MASK));
+  newCONSTSUB(stash, "A_THREADSAFE",  newSVuv(A_THREADSAFE));
+  newCONSTSUB(stash, "A_FORKSAFE",    newSVuv(A_FORKSAFE));
  }
+
+ a_setup();
 }
+
+#if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
+
+void
+CLONE(...)
+PROTOTYPE: DISABLE
+PREINIT:
+ ptable *t;
+ int    *level;
+CODE:
+ {
+  my_cxt_t ud;
+  dMY_CXT;
+  ud.tbl   = t = ptable_new();
+  ud.owner = MY_CXT.owner;
+  ptable_walk(MY_CXT.tbl, a_ptable_clone, &ud);
+ }
+ {
+  MY_CXT_CLONE;
+  MY_CXT.tbl   = t;
+  MY_CXT.owner = aTHX;
+ }
+ {
+  level = PerlMemShared_malloc(sizeof *level);
+  *level = 1;
+  LEAVEn("sub");
+  SAVEDESTRUCTOR_X(a_thread_cleanup, level);
+  ENTERn("sub");
+ }
+
+#endif
 
 SV *
 _tag(SV *hint)

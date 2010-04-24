@@ -11,13 +11,13 @@ autovivification - Lexically disable autovivification.
 
 =head1 VERSION
 
-Version 0.05
+Version 0.06
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.05';
+ $VERSION = '0.06';
 }
 
 =head1 SYNOPSIS
@@ -150,6 +150,18 @@ sub import {
  $^H{+(__PACKAGE__)} = _tag($hint);
  ();
 }
+
+=head1 CONSTANTS
+
+=head2 C<A_THREADSAFE>
+
+True iff the module could have been built with thread-safety features enabled.
+This constant only has a meaning with your perl is threaded ; otherwise, it'll always be false.
+
+=head2 C<A_FORKSAFE>
+
+True iff this module could have been built with fork-safety features enabled.
+This will always be true except on Windows where it's false for perl 5.10.0 and below .
 
 =head1 CAVEATS
 
