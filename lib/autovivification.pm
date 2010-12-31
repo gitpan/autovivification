@@ -1,6 +1,6 @@
 package autovivification;
 
-use 5.008;
+use 5.008003;
 
 use strict;
 use warnings;
@@ -11,13 +11,13 @@ autovivification - Lexically disable autovivification.
 
 =head1 VERSION
 
-Version 0.06
+Version 0.07
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.06';
+ $VERSION = '0.07';
 }
 
 =head1 SYNOPSIS
@@ -55,7 +55,7 @@ BEGIN {
 
 =head2 C<unimport @opts>
 
-Magically called when C<no autovivification> is encountered.
+Magically called when C<no autovivification @opts> is encountered.
 Enables the features given in C<@opts>, which can be :
 
 =over 4
@@ -64,42 +64,69 @@ Enables the features given in C<@opts>, which can be :
 
 C<'fetch'>
 
-Turn off autovivification for rvalue dereferencing expressions, such as C<< $value = $hashref->{key}[$idx]{$field} >>, C<< keys %{$hashref->{key}} >> or C<< values %{$hashref->{key}} >>.
-Starting from perl C<5.11>, it also covers C<keys> and C<values> on array references.
+Turns off autovivification for rvalue dereferencing expressions, such as :
+
+    $value = $arrayref->[$idx]
+    $value = $hashref->{$key}
+    keys %$hashref
+    values %$hashref
+
+Starting from perl C<5.11>, it also covers C<keys> and C<values> on array references :
+
+    keys @$arrayref
+    values @$arrayref
+
 When the expression would have autovivified, C<undef> is returned for a plain fetch, while C<keys> and C<values> return C<0> in scalar context and the empty list in list context.
 
 =item *
 
 C<'exists'>
 
-Turn off autovivification for dereferencing expressions that are parts of an C<exists>, such as C<< exists $hashref->{key}[$idx]{$field} >>.
+Turns off autovivification for dereferencing expressions that are parts of an C<exists>, such as :
+
+    exists $arrayref->[$idx]
+    exists $hashref->{$key}
+
 C<''> is returned when the expression would have autovivified.
 
 =item *
 
 C<'delete'>
 
-Turn off autovivification for dereferencing expressions that are parts of a C<delete>, such as C<< delete $hashref->{key}[$idx]{$field} >>.
+Turns off autovivification for dereferencing expressions that are parts of a C<delete>, such as :
+
+    delete $arrayref->[$idx]
+    delete $hashref->{$key}
+
 C<undef> is returned when the expression would have autovivified.
 
 =item *
 
 C<'store'>
 
-Turn off autovivification for lvalue dereferencing expressions, such as C<< $hashref->{key}[$idx]{$field} = $value >> or C<< for ($hashref->{key}[$idx]{$field}) { ... } >>.
-An exception is thrown if vivification is needed to store the value, which means that effectively you can only assign to levels that are already defined (in the example, this would require C<< $hashref->{key}[$idx] >> to already be a hash reference).
+Turns off autovivification for lvalue dereferencing expressions, such as :
+
+    $arrayref->[$idx] = $value
+    $hashref->{$key} = $value
+    for ($arrayref->[$idx]) { ... }
+    for ($hashref->{$key}) { ... }
+    function($arrayref->[$idx])
+    function($hashref->{$key})
+
+An exception is thrown if vivification is needed to store the value, which means that effectively you can only assign to levels that are already defined
+In the example, this would require C<$arrayref> (resp. C<$hashref>) to already be an array (resp. hash) reference.
 
 =item *
 
 C<'warn'>
 
-Emit a warning when an autovivification is avoided.
+Emits a warning when an autovivification is avoided.
 
 =item *
 
 C<'strict'>
 
-Throw an exception when an autovivification is avoided.
+Throws an exception when an autovivification is avoided.
 
 =back
 
@@ -130,7 +157,7 @@ sub unimport {
 
 =head2 C<import @opts>
 
-Magically called when C<use autovivification> is encountered.
+Magically called when C<use autovivification @opts> is encountered.
 Disables the features given in C<@opts>, which can be the same as for L</unimport>.
 
 Each call to C<import> removes the specified features to the ones already in use in the current lexical scope.
@@ -171,7 +198,10 @@ If warnings are turned on, Perl will complain about one-element slices.
 
 =head1 DEPENDENCIES
 
-L<perl> 5.8.
+L<perl> 5.8.3.
+
+A C compiler.
+This module may happen to build with a C++ compiler as well, but don't rely on it, as no guarantee is made in this regard.
 
 L<XSLoader> (standard since perl 5.006).
 

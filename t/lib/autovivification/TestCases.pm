@@ -3,7 +3,7 @@ package autovivification::TestCases;
 use strict;
 use warnings;
 
-use Test::More;
+use Test::Leaner;
 
 sub import {
  no strict 'refs';
@@ -11,6 +11,10 @@ sub import {
 }
 
 sub in_strict { (caller 0)[8] & (eval { strict::bits(@_) } || 0) };
+
+sub do_nothing { }
+
+sub set_arg { $_[0] = 1 }
 
 sub generate {
  my ($var, $init, $code, $exp, $use, $opts, $global) = @_;

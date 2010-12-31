@@ -21,22 +21,12 @@
 
 #define A_HAS_PERL(R, V, S) (PERL_REVISION > (R) || (PERL_REVISION == (R) && (PERL_VERSION > (V) || (PERL_VERSION == (V) && (PERL_SUBVERSION >= (S))))))
 
-#undef ENTERn
-#if defined(ENTER_with_name) && !A_HAS_PERL(5, 11, 4)
-# define ENTERn(N) ENTER_with_name(N)
-#else
-# define ENTERn(N) ENTER
-#endif
-
-#undef LEAVEn
-#if defined(LEAVE_with_name) && !A_HAS_PERL(5, 11, 4)
-# define LEAVEn(N) LEAVE_with_name(N)
-#else
-# define LEAVEn(N) LEAVE
-#endif
-
 #ifndef A_WORKAROUND_REQUIRE_PROPAGATION
 # define A_WORKAROUND_REQUIRE_PROPAGATION !A_HAS_PERL(5, 10, 1)
+#endif
+
+#ifndef A_HAS_RPEEP
+# define A_HAS_RPEEP A_HAS_PERL(5, 13, 5)
 #endif
 
 /* ... Thread safety and multiplicity ...................................... */
@@ -57,7 +47,8 @@
 #  define A_MULTIPLICITY 0
 # endif
 #endif
-#if A_MULTIPLICITY && !defined(tTHX)
+
+#ifndef tTHX
 # define tTHX PerlInterpreter*
 #endif
 
@@ -112,71 +103,98 @@ typedef struct {
 #define ptable_hints_store(T, K, V) ptable_hints_store(aTHX_ (T), (K), (V))
 #define ptable_hints_free(T)        ptable_hints_free(aTHX_ (T))
 
+#endif /* A_THREADSAFE */
+
+#endif /* A_WORKAROUND_REQUIRE_PROPAGATION */
+
+#if !A_HAS_RPEEP
+
+#define PTABLE_NAME        ptable_seen
+#define PTABLE_VAL_FREE(V) NOOP
+
+#include "ptable.h"
+
+#endif /* !A_HAS_RPEEP */
+
+#define A_NEED_CXT ((A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION) || !A_HAS_RPEEP)
+
+#if A_NEED_CXT
+
 #define MY_CXT_KEY __PACKAGE__ "::_guts" XS_VERSION
 
 typedef struct {
+#if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
  ptable *tbl;   /* It really is a ptable_hints */
  tTHX    owner;
+#endif /* A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION */
+#if !A_HAS_RPEEP
+ ptable *seen;  /* It really is a ptable_seen */
+#endif /* !A_HAS_RPEEP */
 } my_cxt_t;
 
 START_MY_CXT
 
-STATIC SV *a_clone(pTHX_ SV *sv, tTHX owner) {
-#define a_clone(S, O) a_clone(aTHX_ (S), (O))
- CLONE_PARAMS  param;
- AV           *stashes = NULL;
- SV           *dupsv;
+#if A_THREADSAFE
 
- if (SvTYPE(sv) == SVt_PVHV && HvNAME_get(sv))
-  stashes = newAV();
+#if A_WORKAROUND_REQUIRE_PROPAGATION
 
- param.stashes    = stashes;
- param.flags      = 0;
- param.proto_perl = owner;
+typedef struct {
+ ptable *tbl;
+#if A_HAS_PERL(5, 13, 2)
+ CLONE_PARAMS *params;
+#else
+ CLONE_PARAMS params;
+#endif
+} a_ptable_clone_ud;
 
- dupsv = sv_dup(sv, &param);
-
- if (stashes) {
-  av_undef(stashes);
-  SvREFCNT_dec(stashes);
- }
-
- return SvREFCNT_inc(dupsv);
-}
+#if A_HAS_PERL(5, 13, 2)
+# define a_ptable_clone_ud_init(U, T, O) \
+   (U).tbl    = (T); \
+   (U).params = Perl_clone_params_new((O), aTHX)
+# define a_ptable_clone_ud_deinit(U) Perl_clone_params_del((U).params)
+# define a_dup_inc(S, U)             SvREFCNT_inc(sv_dup((S), (U)->params))
+#else
+# define a_ptable_clone_ud_init(U, T, O) \
+   (U).tbl               = (T);     \
+   (U).params.stashes    = newAV(); \
+   (U).params.flags      = 0;       \
+   (U).params.proto_perl = (O)
+# define a_ptable_clone_ud_deinit(U) SvREFCNT_dec((U).params.stashes)
+# define a_dup_inc(S, U)             SvREFCNT_inc(sv_dup((S), &((U)->params)))
+#endif
 
 STATIC void a_ptable_clone(pTHX_ ptable_ent *ent, void *ud_) {
- my_cxt_t *ud = ud_;
+ a_ptable_clone_ud *ud = ud_;
  a_hint_t *h1 = ent->val;
  a_hint_t *h2;
 
- if (ud->owner == aTHX)
-  return;
-
  h2              = PerlMemShared_malloc(sizeof *h2);
  h2->bits        = h1->bits;
- h2->require_tag = PTR2IV(a_clone(INT2PTR(SV *, h1->require_tag), ud->owner));
+ h2->require_tag = PTR2IV(a_dup_inc(INT2PTR(SV *, h1->require_tag), ud));
 
  ptable_hints_store(ud->tbl, ent->key, h2);
 }
 
-STATIC void a_thread_cleanup(pTHX_ void *);
+#endif /* A_WORKAROUND_REQUIRE_PROPAGATION */
+
+#include "reap.h"
 
 STATIC void a_thread_cleanup(pTHX_ void *ud) {
- int *level = ud;
+ dMY_CXT;
 
- if (*level) {
-  *level = 0;
-  LEAVE;
-  SAVEDESTRUCTOR_X(a_thread_cleanup, level);
-  ENTER;
- } else {
-  dMY_CXT;
-  PerlMemShared_free(level);
-  ptable_hints_free(MY_CXT.tbl);
- }
+#if A_WORKAROUND_REQUIRE_PROPAGATION
+ ptable_hints_free(MY_CXT.tbl);
+#endif /* A_WORKAROUND_REQUIRE_PROPAGATION */
+#if !A_HAS_RPEEP
+ ptable_seen_free(MY_CXT.seen);
+#endif /* !A_HAS_RPEEP */
 }
 
 #endif /* A_THREADSAFE */
+
+#endif /* A_NEED_CXT */
+
+#if A_WORKAROUND_REQUIRE_PROPAGATION
 
 STATIC IV a_require_tag(pTHX) {
 #define a_require_tag() a_require_tag(aTHX)
@@ -225,7 +243,9 @@ get_enclosing_cv:
 STATIC SV *a_tag(pTHX_ UV bits) {
 #define a_tag(B) a_tag(aTHX_ (B))
  a_hint_t *h;
+#if A_THREADSAFE
  dMY_CXT;
+#endif
 
  h              = PerlMemShared_malloc(sizeof *h);
  h->bits        = bits;
@@ -244,7 +264,9 @@ STATIC SV *a_tag(pTHX_ UV bits) {
 STATIC UV a_detag(pTHX_ const SV *hint) {
 #define a_detag(H) a_detag(aTHX_ (H))
  a_hint_t *h;
+#if A_THREADSAFE
  dMY_CXT;
+#endif
 
  if (!(hint && SvIOK(hint)))
   return 0;
@@ -271,7 +293,7 @@ STATIC UV a_detag(pTHX_ const SV *hint) {
      ? SvUVX(H)    \
      : (SvPOK(H)   \
         ? sv_2uv(SvLEN(H) ? (H) : sv_mortalcopy(H)) \
-	: 0        \
+        : 0        \
        )           \
      )             \
   : 0)
@@ -298,7 +320,9 @@ STATIC U32 a_hash = 0;
 STATIC UV a_hint(pTHX) {
 #define a_hint() a_hint(aTHX)
  SV *hint;
-#if A_HAS_PERL(5, 9, 5)
+#ifdef cop_hints_fetch_pvn
+ hint = cop_hints_fetch_pvn(PL_curcop, __PACKAGE__, __PACKAGE_LEN__, a_hash, 0);
+#elif A_HAS_PERL(5, 9, 5)
  hint = Perl_refcounted_he_fetch(aTHX_ PL_curcop->cop_hints_hash,
                                        NULL,
                                        __PACKAGE__, __PACKAGE_LEN__,
@@ -332,15 +356,18 @@ typedef struct {
 STATIC ptable *a_op_map = NULL;
 
 #ifdef USE_ITHREADS
+
+#define dA_MAP_THX a_op_info a_op_map_tmp_oi
+
 STATIC perl_mutex a_op_map_mutex;
-#endif
+
+#define A_LOCK(M)   MUTEX_LOCK(M)
+#define A_UNLOCK(M) MUTEX_UNLOCK(M)
 
 STATIC const a_op_info *a_map_fetch(const OP *o, a_op_info *oi) {
  const a_op_info *val;
 
-#ifdef USE_ITHREADS
- MUTEX_LOCK(&a_op_map_mutex);
-#endif
+ A_LOCK(&a_op_map_mutex);
 
  val = ptable_fetch(a_op_map, o);
  if (val) {
@@ -348,12 +375,23 @@ STATIC const a_op_info *a_map_fetch(const OP *o, a_op_info *oi) {
   val = oi;
  }
 
-#ifdef USE_ITHREADS
- MUTEX_UNLOCK(&a_op_map_mutex);
-#endif
+ A_UNLOCK(&a_op_map_mutex);
 
  return val;
 }
+
+#define a_map_fetch(O) a_map_fetch((O), &a_op_map_tmp_oi)
+
+#else /* USE_ITHREADS */
+
+#define dA_MAP_THX dNOOP
+
+#define A_LOCK(M)   NOOP
+#define A_UNLOCK(M) NOOP
+
+#define a_map_fetch(O) ptable_fetch(a_op_map, (O))
+
+#endif /* !USE_ITHREADS */
 
 STATIC const a_op_info *a_map_store_locked(pPTBLMS_ const OP *o, OP *(*old_pp)(pTHX), void *next, UV flags) {
 #define a_map_store_locked(O, PP, N, F) a_map_store_locked(aPTBLMS_ (O), (PP), (N), (F))
@@ -373,29 +411,20 @@ STATIC const a_op_info *a_map_store_locked(pPTBLMS_ const OP *o, OP *(*old_pp)(p
 
 STATIC void a_map_store(pPTBLMS_ const OP *o, OP *(*old_pp)(pTHX), void *next, UV flags) {
 #define a_map_store(O, PP, N, F) a_map_store(aPTBLMS_ (O), (PP), (N), (F))
-
-#ifdef USE_ITHREADS
- MUTEX_LOCK(&a_op_map_mutex);
-#endif
+ A_LOCK(&a_op_map_mutex);
 
  a_map_store_locked(o, old_pp, next, flags);
 
-#ifdef USE_ITHREADS
- MUTEX_UNLOCK(&a_op_map_mutex);
-#endif
+ A_UNLOCK(&a_op_map_mutex);
 }
 
 STATIC void a_map_delete(pTHX_ const OP *o) {
 #define a_map_delete(O) a_map_delete(aTHX_ (O))
-#ifdef USE_ITHREADS
- MUTEX_LOCK(&a_op_map_mutex);
-#endif
+ A_LOCK(&a_op_map_mutex);
 
- ptable_map_store(a_op_map, o, NULL);
+ ptable_map_delete(a_op_map, o);
 
-#ifdef USE_ITHREADS
- MUTEX_UNLOCK(&a_op_map_mutex);
-#endif
+ A_UNLOCK(&a_op_map_mutex);
 }
 
 STATIC const OP *a_map_descend(const OP *o) {
@@ -419,9 +448,7 @@ STATIC void a_map_store_root(pPTBLMS_ const OP *root, OP *(*old_pp)(pTHX), UV fl
  a_op_info *oi;
  const OP *o = root;
 
-#ifdef USE_ITHREADS
- MUTEX_LOCK(&a_op_map_mutex);
-#endif
+ A_LOCK(&a_op_map_mutex);
 
  roi = a_map_store_locked(o, old_pp, (OP *) root, flags | A_HINT_ROOT);
 
@@ -436,9 +463,7 @@ STATIC void a_map_store_root(pPTBLMS_ const OP *root, OP *(*old_pp)(pTHX), UV fl
   }
  }
 
-#ifdef USE_ITHREADS
- MUTEX_UNLOCK(&a_op_map_mutex);
-#endif
+ A_UNLOCK(&a_op_map_mutex);
 
  return;
 }
@@ -447,9 +472,7 @@ STATIC void a_map_update_flags_topdown(const OP *root, UV flags) {
  a_op_info *oi;
  const OP *o = root;
 
-#ifdef USE_ITHREADS
- MUTEX_LOCK(&a_op_map_mutex);
-#endif
+ A_LOCK(&a_op_map_mutex);
 
  flags &= ~A_HINT_ROOT;
 
@@ -461,9 +484,7 @@ STATIC void a_map_update_flags_topdown(const OP *root, UV flags) {
   o = a_map_descend(o);
  } while (o);
 
-#ifdef USE_ITHREADS
- MUTEX_UNLOCK(&a_op_map_mutex);
-#endif
+ A_UNLOCK(&a_op_map_mutex);
 
  return;
 }
@@ -473,9 +494,7 @@ STATIC void a_map_update_flags_topdown(const OP *root, UV flags) {
 STATIC void a_map_update_flags_bottomup(const OP *o, UV flags, UV rflags) {
  a_op_info *oi;
 
-#ifdef USE_ITHREADS
- MUTEX_LOCK(&a_op_map_mutex);
-#endif
+ A_LOCK(&a_op_map_mutex);
 
  flags  &= ~A_HINT_ROOT;
  rflags |=  A_HINT_ROOT;
@@ -487,19 +506,17 @@ STATIC void a_map_update_flags_bottomup(const OP *o, UV flags, UV rflags) {
  }
  oi->flags = rflags;
 
-#ifdef USE_ITHREADS
- MUTEX_UNLOCK(&a_op_map_mutex);
-#endif
+ A_UNLOCK(&a_op_map_mutex);
 
  return;
 }
 
 /* ... Decide whether this expression should be autovivified or not ........ */
 
-STATIC UV a_map_resolve(const OP *o, a_op_info *oi) {
+STATIC UV a_map_resolve(const OP *o, const a_op_info *oi) {
  UV flags = 0, rflags;
  const OP *root;
- a_op_info *roi = oi;
+ const a_op_info *roi = oi;
 
  while (!(roi->flags & A_HINT_ROOT))
   roi = roi->next;
@@ -529,30 +546,30 @@ cancel:
  return oi->flags & A_HINT_ROOT ? 0 : flags;
 }
 
-/* ... Lightweight pp_defined() ............................................ */
+/* ... Inspired from pp_defined() .......................................... */
 
-STATIC bool a_defined(pTHX_ SV *sv) {
-#define a_defined(S) a_defined(aTHX_ (S))
- bool defined = FALSE;
-
+STATIC int a_undef(pTHX_ SV *sv) {
+#define a_undef(S) a_undef(aTHX_ (S))
  switch (SvTYPE(sv)) {
+  case SVt_NULL:
+   return 1;
   case SVt_PVAV:
    if (AvMAX(sv) >= 0 || SvGMAGICAL(sv)
                       || (SvRMAGICAL(sv) && mg_find(sv, PERL_MAGIC_tied)))
-    defined = TRUE;
+    return 0;
    break;
   case SVt_PVHV:
    if (HvARRAY(sv) || SvGMAGICAL(sv)
                    || (SvRMAGICAL(sv) && mg_find(sv, PERL_MAGIC_tied)))
-    defined = TRUE;
+    return 0;
    break;
   default:
    SvGETMAGIC(sv);
    if (SvOK(sv))
-    defined = TRUE;
+    return 0;
  }
 
- return defined;
+ return 1;
 }
 
 /* --- PP functions -------------------------------------------------------- */
@@ -566,15 +583,14 @@ STATIC bool a_defined(pTHX_ SV *sv) {
 /* ... pp_rv2av ............................................................ */
 
 STATIC OP *a_pp_rv2av(pTHX) {
- a_op_info oi;
- UV flags;
+ dA_MAP_THX;
+ const a_op_info *oi;
  dSP;
 
- a_map_fetch(PL_op, &oi);
- flags = oi.flags;
+ oi = a_map_fetch(PL_op);
 
- if (flags & A_HINT_DEREF) {
-  if (!a_defined(TOPs)) {
+ if (oi->flags & A_HINT_DEREF) {
+  if (a_undef(TOPs)) {
    /* We always need to push an empty array to fool the pp_aelem() that comes
     * later. */
    SV *av;
@@ -583,79 +599,67 @@ STATIC OP *a_pp_rv2av(pTHX) {
    PUSHs(av);
    RETURN;
   }
- } else {
-  PL_op->op_ppaddr = oi.old_pp;
  }
 
- return CALL_FPTR(oi.old_pp)(aTHX);
+ return oi->old_pp(aTHX);
 }
 
 /* ... pp_rv2hv ............................................................ */
 
 STATIC OP *a_pp_rv2hv_simple(pTHX) {
- a_op_info oi;
- UV flags;
+ dA_MAP_THX;
+ const a_op_info *oi;
  dSP;
 
- a_map_fetch(PL_op, &oi);
- flags = oi.flags;
+ oi = a_map_fetch(PL_op);
 
- if (flags & A_HINT_DEREF) {
-  if (!a_defined(TOPs))
+ if (oi->flags & A_HINT_DEREF) {
+  if (a_undef(TOPs))
    RETURN;
- } else {
-  PL_op->op_ppaddr = oi.old_pp;
  }
 
- return CALL_FPTR(oi.old_pp)(aTHX);
+ return oi->old_pp(aTHX);
 }
 
 STATIC OP *a_pp_rv2hv(pTHX) {
- a_op_info oi;
- UV flags;
+ dA_MAP_THX;
+ const a_op_info *oi;
  dSP;
 
- a_map_fetch(PL_op, &oi);
- flags = oi.flags;
+ oi = a_map_fetch(PL_op);
 
- if (flags & A_HINT_DEREF) {
-  if (!a_defined(TOPs)) {
+ if (oi->flags & A_HINT_DEREF) {
+  if (a_undef(TOPs)) {
    SV *hv;
    POPs;
    hv = sv_2mortal((SV *) newHV());
    PUSHs(hv);
    RETURN;
   }
- } else {
-  PL_op->op_ppaddr = oi.old_pp;
  }
 
- return CALL_FPTR(oi.old_pp)(aTHX);
+ return oi->old_pp(aTHX);
 }
 
 /* ... pp_deref (aelem,helem,rv2sv,padsv) .................................. */
 
 STATIC OP *a_pp_deref(pTHX) {
- a_op_info oi;
+ dA_MAP_THX;
+ const a_op_info *oi;
  UV flags;
  dSP;
 
- a_map_fetch(PL_op, &oi);
- flags = oi.flags;
+ oi = a_map_fetch(PL_op);
 
+ flags = oi->flags;
  if (flags & A_HINT_DEREF) {
   OP *o;
-  U8 old_private;
 
-deref:
-  old_private       = PL_op->op_private;
-  PL_op->op_private = ((old_private & ~OPpDEREF) | OPpLVAL_DEFER);
-  o = CALL_FPTR(oi.old_pp)(aTHX);
-  PL_op->op_private = old_private;
+  o = oi->old_pp(aTHX);
 
   if (flags & (A_HINT_NOTIFY|A_HINT_STORE)) {
    SPAGAIN;
-   if (!a_defined(TOPs)) {
+   if (a_undef(TOPs)) {
     if (flags & A_HINT_STRICT)
      croak("Reference vivification forbidden");
     else if (flags & A_HINT_WARN)
@@ -666,31 +670,17 @@ deref:
   }
 
   return o;
- } else if ((flags & ~A_HINT_ROOT)
-                    && (PL_op->op_private & OPpDEREF || flags & A_HINT_ROOT)) {
-  /* Decide if the expression must autovivify or not.
-   * This branch should be called only once by expression. */
-  flags = a_map_resolve(PL_op, &oi);
-
-  /* We need the updated flags value in the deref branch. */
-  if (flags & A_HINT_DEREF)
-   goto deref;
  }
 
- /* This op doesn't need to skip autovivification, so restore the original
-  * state. */
- PL_op->op_ppaddr = oi.old_pp;
-
- return CALL_FPTR(oi.old_pp)(aTHX);
+ return oi->old_pp(aTHX);
 }
 
 /* ... pp_root (exists,delete,keys,values) ................................. */
 
 STATIC OP *a_pp_root_unop(pTHX) {
- a_op_info oi;
  dSP;
 
- if (!a_defined(TOPs)) {
+ if (a_undef(TOPs)) {
   POPs;
   /* Can only be reached by keys or values */
   if (GIMME_V == G_SCALAR) {
@@ -700,16 +690,17 @@ STATIC OP *a_pp_root_unop(pTHX) {
   RETURN;
  }
 
- a_map_fetch(PL_op, &oi);
-
- return CALL_FPTR(oi.old_pp)(aTHX);
+ {
+  dA_MAP_THX;
+  const a_op_info *oi = a_map_fetch(PL_op);
+  return oi->old_pp(aTHX);
+ }
 }
 
 STATIC OP *a_pp_root_binop(pTHX) {
- a_op_info oi;
  dSP;
 
- if (!a_defined(TOPm1s)) {
+ if (a_undef(TOPm1s)) {
   POPs;
   POPs;
   if (PL_op->op_type == OP_EXISTS)
@@ -718,22 +709,26 @@ STATIC OP *a_pp_root_binop(pTHX) {
    RETPUSHUNDEF;
  }
 
- a_map_fetch(PL_op, &oi);
-
- return CALL_FPTR(oi.old_pp)(aTHX);
+ {
+  dA_MAP_THX;
+  const a_op_info *oi = a_map_fetch(PL_op);
+  return oi->old_pp(aTHX);
+ }
 }
 
 /* --- Check functions ----------------------------------------------------- */
 
 STATIC void a_recheck_rv2xv(pTHX_ OP *o, OPCODE type, OP *(*new_pp)(pTHX)) {
 #define a_recheck_rv2xv(O, T, PP) a_recheck_rv2xv(aTHX_ (O), (T), (PP))
- a_op_info oi;
 
  if (o->op_type == type && o->op_ppaddr != new_pp
-                        && cUNOPo->op_first->op_type != OP_GV
-                        && a_map_fetch(o, &oi)) {
-  a_map_store(o, o->op_ppaddr, oi.next, oi.flags);
-  o->op_ppaddr = new_pp;
+                        && cUNOPo->op_first->op_type != OP_GV) {
+  dA_MAP_THX;
+  const a_op_info *oi = a_map_fetch(o);
+  if (oi) {
+   a_map_store(o, o->op_ppaddr, oi->next, oi->flags);
+   o->op_ppaddr = new_pp;
+  }
  }
 
  return;
@@ -741,49 +736,22 @@ STATIC void a_recheck_rv2xv(pTHX_ OP *o, OPCODE type, OP *(*new_pp)(pTHX)) {
 
 /* ... ck_pad{any,sv} ...................................................... */
 
-/* Sadly, the PADSV OPs we are interested in don't trigger the padsv check
- * function, but are instead manually mutated from a PADANY. This is why we set
- * PL_ppaddr[OP_PADSV] in the padany check function so that PADSV OPs will have
- * their op_ppaddr set to our pp_padsv. PL_ppaddr[OP_PADSV] is then reset at the
- * beginning of every ck_pad{any,sv}. Some unwanted OPs can still call our
- * pp_padsv, but much less than if we would have set PL_ppaddr[OP_PADSV]
- * globally. */
-
-STATIC OP *(*a_pp_padsv_saved)(pTHX) = 0;
-
-STATIC void a_pp_padsv_save(void) {
- if (a_pp_padsv_saved)
-  return;
-
- a_pp_padsv_saved    = PL_ppaddr[OP_PADSV];
- PL_ppaddr[OP_PADSV] = a_pp_deref;
-}
-
-STATIC void a_pp_padsv_restore(OP *o) {
- if (!a_pp_padsv_saved)
-  return;
-
- if (o->op_ppaddr == a_pp_deref)
-  o->op_ppaddr = a_pp_padsv_saved;
-
- PL_ppaddr[OP_PADSV] = a_pp_padsv_saved;
- a_pp_padsv_saved    = 0;
-}
+/* Sadly, the padsv OPs we are interested in don't trigger the padsv check
+ * function, but are instead manually mutated from a padany. So we store
+ * the op entry in the op map in the padany check function, and we set their
+ * op_ppaddr member in our peephole optimizer replacement below. */
 
 STATIC OP *(*a_old_ck_padany)(pTHX_ OP *) = 0;
 
 STATIC OP *a_ck_padany(pTHX_ OP *o) {
  UV hint;
 
- a_pp_padsv_restore(o);
-
- o = CALL_FPTR(a_old_ck_padany)(aTHX_ o);
+ o = a_old_ck_padany(aTHX_ o);
 
  hint = a_hint();
- if (hint & A_HINT_DO) {
-  a_pp_padsv_save();
-  a_map_store_root(o, a_pp_padsv_saved, hint);
- } else
+ if (hint & A_HINT_DO)
+  a_map_store_root(o, o->op_ppaddr, hint);
+ else
   a_map_delete(o);
 
  return o;
@@ -794,9 +762,7 @@ STATIC OP *(*a_old_ck_padsv)(pTHX_ OP *) = 0;
 STATIC OP *a_ck_padsv(pTHX_ OP *o) {
  UV hint;
 
- a_pp_padsv_restore(o);
-
- o = CALL_FPTR(a_old_ck_padsv)(aTHX_ o);
+ o = a_old_ck_padsv(aTHX_ o);
 
  hint = a_hint();
  if (hint & A_HINT_DO) {
@@ -838,7 +804,7 @@ STATIC OP *a_ck_deref(pTHX_ OP *o) {
    old_ck = a_old_ck_rv2sv;
    break;
  }
- o = CALL_FPTR(old_ck)(aTHX_ o);
+ o = old_ck(aTHX_ o);
 
  if (hint & A_HINT_DO) {
   a_map_store_root(o, o->op_ppaddr, hint);
@@ -868,7 +834,7 @@ STATIC OP *a_ck_rv2xv(pTHX_ OP *o) {
   case OP_RV2AV: old_ck = a_old_ck_rv2av; new_pp = a_pp_rv2av; break;
   case OP_RV2HV: old_ck = a_old_ck_rv2hv; new_pp = a_pp_rv2hv_simple; break;
  }
- o = CALL_FPTR(old_ck)(aTHX_ o);
+ o = old_ck(aTHX_ o);
 
  if (cUNOPo->op_first->op_type == OP_GV)
   return o;
@@ -907,7 +873,7 @@ STATIC OP *a_ck_xslice(pTHX_ OP *o) {
     a_recheck_rv2xv(cUNOPo->op_first->op_sibling, OP_RV2HV, a_pp_rv2hv);
    break;
  }
- o = CALL_FPTR(old_ck)(aTHX_ o);
+ o = old_ck(aTHX_ o);
 
  if (hint & A_HINT_DO) {
   a_map_store_root(o, 0, hint);
@@ -955,7 +921,7 @@ STATIC OP *a_ck_root(pTHX_ OP *o) {
    enabled = hint & A_HINT_FETCH;
    break;
  }
- o = CALL_FPTR(old_ck)(aTHX_ o);
+ o = old_ck(aTHX_ o);
 
  if (hint & A_HINT_DO) {
   if (enabled) {
@@ -971,6 +937,134 @@ STATIC OP *a_ck_root(pTHX_ OP *o) {
  return o;
 }
 
+/* ... Our peephole optimizer .............................................. */
+
+STATIC peep_t a_old_peep = 0; /* This is actually the rpeep past 5.13.5 */
+
+#if !A_HAS_RPEEP
+# define A_PEEP_REC_PROTO STATIC void a_peep_rec(pTHX_ OP *o, ptable *seen)
+#else /* !A_HAS_RPEEP */
+# define A_PEEP_REC_PROTO STATIC void a_peep_rec(pTHX_ OP *o)
+#endif /* A_HAS_RPEEP */
+
+A_PEEP_REC_PROTO;
+A_PEEP_REC_PROTO {
+#if !A_HAS_RPEEP
+# define a_peep_rec(O) a_peep_rec(aTHX_ (O), seen)
+#else /* !A_HAS_RPEEP */
+# define a_peep_rec(O) a_peep_rec(aTHX_ (O))
+#endif /* A_HAS_RPEEP */
+ dA_MAP_THX;
+
+#if !A_HAS_RPEEP
+ if (ptable_fetch(seen, o))
+  return;
+#endif
+
+ for (; o; o = o->op_next) {
+  const a_op_info *oi = NULL;
+  UV flags = 0;
+
+#if !A_HAS_RPEEP
+  ptable_seen_store(seen, o, o);
+#endif
+  switch (o->op_type) {
+   case OP_PADSV:
+    if (o->op_ppaddr != a_pp_deref) {
+     oi = a_map_fetch(o);
+     if (oi && (oi->flags & A_HINT_DO)) {
+      a_map_store(o, o->op_ppaddr, oi->next, oi->flags);
+      o->op_ppaddr = a_pp_deref;
+     }
+    }
+    /* FALLTHROUGH */
+   case OP_AELEM:
+   case OP_AELEMFAST:
+   case OP_HELEM:
+   case OP_RV2SV:
+    if (o->op_ppaddr != a_pp_deref)
+     break;
+    oi = a_map_fetch(o);
+    if (!oi)
+     break;
+    flags = oi->flags;
+    if (!(flags & A_HINT_DEREF)
+        && (flags & A_HINT_DO)
+        && (o->op_private & OPpDEREF || flags & A_HINT_ROOT)) {
+     /* Decide if the expression must autovivify or not. */
+     flags = a_map_resolve(o, oi);
+    }
+    if (flags & A_HINT_DEREF)
+     o->op_private = ((o->op_private & ~OPpDEREF) | OPpLVAL_DEFER);
+    else
+     o->op_ppaddr  = oi->old_pp;
+    break;
+   case OP_RV2AV:
+   case OP_RV2HV:
+    if (   o->op_ppaddr != a_pp_rv2av
+        && o->op_ppaddr != a_pp_rv2hv
+        && o->op_ppaddr != a_pp_rv2hv_simple)
+     break;
+    oi = a_map_fetch(o);
+    if (!oi)
+     break;
+    if (!(oi->flags & A_HINT_DEREF))
+     o->op_ppaddr  = oi->old_pp;
+    break;
+#if !A_HAS_RPEEP
+   case OP_MAPWHILE:
+   case OP_GREPWHILE:
+   case OP_AND:
+   case OP_OR:
+   case OP_ANDASSIGN:
+   case OP_ORASSIGN:
+   case OP_COND_EXPR:
+   case OP_RANGE:
+# if A_HAS_PERL(5, 10, 0)
+   case OP_ONCE:
+   case OP_DOR:
+   case OP_DORASSIGN:
+# endif
+    a_peep_rec(cLOGOPo->op_other);
+    break;
+   case OP_ENTERLOOP:
+   case OP_ENTERITER:
+    a_peep_rec(cLOOPo->op_redoop);
+    a_peep_rec(cLOOPo->op_nextop);
+    a_peep_rec(cLOOPo->op_lastop);
+    break;
+# if A_HAS_PERL(5, 9, 5)
+   case OP_SUBST:
+    a_peep_rec(cPMOPo->op_pmstashstartu.op_pmreplstart);
+    break;
+# else
+   case OP_QR:
+   case OP_MATCH:
+   case OP_SUBST:
+    a_peep_rec(cPMOPo->op_pmreplstart);
+    break;
+# endif
+#endif /* !A_HAS_RPEEP */
+   default:
+    break;
+  }
+ }
+}
+
+STATIC void a_peep(pTHX_ OP *o) {
+#if !A_HAS_RPEEP
+ dMY_CXT;
+ ptable *seen = MY_CXT.seen;
+
+ ptable_seen_clear(seen);
+#endif /* !A_HAS_RPEEP */
+
+ a_old_peep(aTHX_ o);
+ a_peep_rec(o);
+}
+
+/* --- Interpreter setup/teardown ------------------------------------------ */
+
 STATIC U32 a_initialized = 0;
 
 STATIC void a_teardown(pTHX_ void *root) {
@@ -983,12 +1077,17 @@ STATIC void a_teardown(pTHX_ void *root) {
   return;
 #endif
 
-#if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
+#if A_NEED_CXT
  {
   dMY_CXT;
+# if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
   ptable_hints_free(MY_CXT.tbl);
+# endif /* A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION */
+# if !A_HAS_RPEEP
+  ptable_seen_free(MY_CXT.seen);
+# endif /* !A_HAS_RPEEP */
  }
-#endif
+#endif /* A_NEED_CXT */
 
  PL_check[OP_PADANY] = MEMBER_TO_FPTR(a_old_ck_padany);
  a_old_ck_padany     = 0;
@@ -1021,10 +1120,12 @@ STATIC void a_teardown(pTHX_ void *root) {
  PL_check[OP_VALUES] = MEMBER_TO_FPTR(a_old_ck_values);
  a_old_ck_values     = 0;
 
- if (a_pp_padsv_saved) {
-  PL_ppaddr[OP_PADSV] = a_pp_padsv_saved;
-  a_pp_padsv_saved    = 0;
- }
+#if A_HAS_RPEEP
+ PL_rpeepp  = a_old_peep;
+#else
+ PL_peepp   = a_old_peep;
+#endif
+ a_old_peep = 0;
 
  a_initialized = 0;
 }
@@ -1034,13 +1135,18 @@ STATIC void a_setup(pTHX) {
  if (a_initialized)
   return;
 
-#if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
+#if A_NEED_CXT
  {
   MY_CXT_INIT;
+# if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
   MY_CXT.tbl   = ptable_new();
   MY_CXT.owner = aTHX;
+# endif /* A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION */
+# if !A_HAS_RPEEP
+  MY_CXT.seen  = ptable_new();
+# endif /* !A_RPEEP */
  }
-#endif
+#endif /* A_NEED_CXT */
 
  a_old_ck_padany     = PL_check[OP_PADANY];
  PL_check[OP_PADANY] = MEMBER_TO_FPTR(a_ck_padany);
@@ -1073,6 +1179,14 @@ STATIC void a_setup(pTHX) {
  a_old_ck_values     = PL_check[OP_VALUES];
  PL_check[OP_VALUES] = MEMBER_TO_FPTR(a_ck_root);
 
+#if A_HAS_RPEEP
+ a_old_peep = PL_rpeepp;
+ PL_rpeepp  = a_peep;
+#else
+ a_old_peep = PL_peepp;
+ PL_peepp   = a_peep;
+#endif
+
 #if A_MULTIPLICITY
  call_atexit(a_teardown, aTHX);
 #else
@@ -1090,8 +1204,8 @@ MODULE = autovivification      PACKAGE = autovivification
 
 PROTOTYPES: ENABLE
 
-BOOT: 
-{                                    
+BOOT:
+{
  if (!a_booted++) {
   HV *stash;
 
@@ -1117,34 +1231,47 @@ BOOT:
  a_setup();
 }
 
-#if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
+#if A_THREADSAFE && (A_WORKAROUND_REQUIRE_PROPAGATION || !A_HAS_RPEEP)
 
 void
 CLONE(...)
 PROTOTYPE: DISABLE
 PREINIT:
+#if A_WORKAROUND_REQUIRE_PROPAGATION
  ptable *t;
- int    *level;
-CODE:
+#endif
+#if !A_HAS_RPEEP
+ ptable *s;
+#endif
+PPCODE:
  {
-  my_cxt_t ud;
   dMY_CXT;
-  ud.tbl   = t = ptable_new();
-  ud.owner = MY_CXT.owner;
-  ptable_walk(MY_CXT.tbl, a_ptable_clone, &ud);
+#if A_WORKAROUND_REQUIRE_PROPAGATION
+  {
+   a_ptable_clone_ud ud;
+
+   t = ptable_new();
+   a_ptable_clone_ud_init(ud, t, MY_CXT.owner);
+   ptable_walk(MY_CXT.tbl, a_ptable_clone, &ud);
+   a_ptable_clone_ud_deinit(ud);
+  }
+#endif
+#if !A_HAS_RPEEP
+  s = ptable_new();
+#endif
  }
  {
   MY_CXT_CLONE;
+#if A_WORKAROUND_REQUIRE_PROPAGATION
   MY_CXT.tbl   = t;
   MY_CXT.owner = aTHX;
+#endif
+#if !A_HAS_RPEEP
+  MY_CXT.seen  = s;
+#endif
  }
- {
-  level = PerlMemShared_malloc(sizeof *level);
-  *level = 1;
-  LEAVEn("sub");
-  SAVEDESTRUCTOR_X(a_thread_cleanup, level);
-  ENTERn("sub");
- }
+ reap(3, a_thread_cleanup, NULL);
+ XSRETURN(0);
 
 #endif
 
