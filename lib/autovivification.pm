@@ -11,13 +11,13 @@ autovivification - Lexically disable autovivification.
 
 =head1 VERSION
 
-Version 0.07
+Version 0.08
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.07';
+ $VERSION = '0.08';
 }
 
 =head1 SYNOPSIS
@@ -132,7 +132,7 @@ Throws an exception when an autovivification is avoided.
 
 Each call to C<unimport> adds the specified features to the ones already in use in the current lexical scope.
 
-When C<@opts> is empty, it defaults to C<qw/fetch exists delete/>.
+When C<@opts> is empty, it defaults to C<< qw<fetch exists delete> >>.
 
 =cut
 
@@ -148,7 +148,7 @@ my %bits = (
 sub unimport {
  shift;
  my $hint = _detag($^H{+(__PACKAGE__)}) || 0;
- @_ = qw/fetch exists delete/ unless @_;
+ @_ = qw<fetch exists delete> unless @_;
  $hint |= $bits{$_} for grep exists $bits{$_}, @_;
  $^H |= 0x00020000;
  $^H{+(__PACKAGE__)} = _tag($hint);
@@ -234,7 +234,7 @@ Matt S. Trout asked for it.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2009,2010 Vincent Pit, all rights reserved.
+Copyright 2009,2010,2011 Vincent Pit, all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 
