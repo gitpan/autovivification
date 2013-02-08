@@ -5,11 +5,12 @@ use warnings;
 
 use Test::More;
 
-if (eval 'use B::Deparse; 1') {
- plan tests => 2;
-} else {
- plan skip_all => 'B::Deparse is not available';
-}
+use lib 't/lib';
+use VPIT::TestHelpers;
+
+load_or_skip_all('B::Deparse', undef, [ ]);
+
+plan tests => 2;
 
 my $bd = B::Deparse->new;
 
