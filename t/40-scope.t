@@ -34,11 +34,11 @@ our $blurp;
 
 {
  local $blurp;
- eval 'no autovivification; use autovivification::TestRequired2; $blurp->{a}'; 
+ eval 'no autovivification; use autovivification::TestRequired2; $blurp->{a}';
  is        $@,     '',      'second require test doesn\'t croak prematurely';
  my $expect;
  $expect = { r1_main => { }, r1_eval => { } };
- $expect->{r2_eval} = { } if "$]" <  5.009005;
+ $expect->{r2_eval} = { } if "$]" <  5.009_005;
  is_deeply $blurp, $expect, 'second require test didn\'t vivify';
 }
 

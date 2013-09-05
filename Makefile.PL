@@ -1,4 +1,4 @@
-use 5.008003;
+use 5.008_003;
 
 use strict;
 use warnings;
@@ -34,7 +34,7 @@ if ($^O eq 'MSWin32' && "$]" < 5.009) {
 }
 
 # Fork emulation got "fixed" in 5.10.1
-if ($^O eq 'MSWin32' && "$]" < 5.010001) {
+if ($^O eq 'MSWin32' && "$]" < 5.010_001) {
  push @DEFINES, '-DA_FORKSAFE=0';
 }
 
@@ -69,7 +69,7 @@ my %META = (
  },
  dynamic_config => 1,
  resources => {
-  bugtracker => "http://rt.cpan.org/NoAuth/ReportBug.html?Queue=$dist",
+  bugtracker => "http://rt.cpan.org/Dist/Display.html?Name=$dist",
   homepage   => "http://search.cpan.org/dist/$dist/",
   license    => 'http://dev.perl.org/licenses/',
   repository => "http://git.profvince.com/?p=perl%2Fmodules%2F$dist.git",
