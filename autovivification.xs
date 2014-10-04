@@ -29,6 +29,10 @@
 # define A_HAS_RPEEP A_HAS_PERL(5, 13, 5)
 #endif
 
+#ifndef OP_SIBLING
+# define OP_SIBLING(O) ((O)->op_sibling)
+#endif
+
 /* ... Thread safety and multiplicity ...................................... */
 
 /* Always safe when the workaround isn't needed */
@@ -210,16 +214,39 @@ STATIC void a_ptable_clone(pTHX_ ptable_ent *ent, void *ud_) {
 
 #endif /* A_WORKAROUND_REQUIRE_PROPAGATION */
 
-#include "reap.h"
-
 STATIC void a_thread_cleanup(pTHX_ void *ud) {
  dMY_CXT;
 
 #if A_WORKAROUND_REQUIRE_PROPAGATION
  ptable_hints_free(MY_CXT.tbl);
+ MY_CXT.tbl  = NULL;
 #endif /* A_WORKAROUND_REQUIRE_PROPAGATION */
  ptable_seen_free(MY_CXT.seen);
+ MY_CXT.seen = NULL;
 }
+
+STATIC int a_endav_free(pTHX_ SV *sv, MAGIC *mg) {
+ SAVEDESTRUCTOR_X(a_thread_cleanup, NULL);
+
+ return 0;
+}
+
+STATIC MGVTBL a_endav_vtbl = {
+ 0,
+ 0,
+ 0,
+ 0,
+ a_endav_free
+#if MGf_COPY
+ , 0
+#endif
+#if MGf_DUP
+ , 0
+#endif
+#if MGf_LOCAL
+ , 0
+#endif
+};
 
 #endif /* A_THREADSAFE */
 
@@ -272,19 +299,22 @@ get_enclosing_cv:
 STATIC SV *a_tag(pTHX_ UV bits) {
 #define a_tag(B) a_tag(aTHX_ (B))
  a_hint_t *h;
+#if A_THREADSAFE
+ dMY_CXT;
+
+ if (!MY_CXT.tbl)
+  return newSViv(0);
+#endif /* A_THREADSAFE */
 
  h              = PerlMemShared_malloc(sizeof *h);
  h->bits        = bits;
  h->require_tag = a_require_tag();
 
 #if A_THREADSAFE
- {
-  dMY_CXT;
-  /* We only need for the key to be an unique tag for looking up the value later
-   * Allocated memory provides convenient unique identifiers, so that's why we
-   * use the hint as the key itself. */
-  ptable_hints_store(MY_CXT.tbl, h, h);
- }
+ /* We only need for the key to be an unique tag for looking up the value later
+  * Allocated memory provides convenient unique identifiers, so that's why we
+  * use the hint as the key itself. */
+ ptable_hints_store(MY_CXT.tbl, h, h);
 #endif /* A_THREADSAFE */
 
  return newSViv(PTR2IV(h));
@@ -293,16 +323,19 @@ STATIC SV *a_tag(pTHX_ UV bits) {
 STATIC UV a_detag(pTHX_ const SV *hint) {
 #define a_detag(H) a_detag(aTHX_ (H))
  a_hint_t *h;
+#if A_THREADSAFE
+ dMY_CXT;
+
+ if (!MY_CXT.tbl)
+  return 0;
+#endif /* A_THREADSAFE */
 
  if (!(hint && SvIOK(hint)))
   return 0;
 
  h = INT2PTR(a_hint_t *, SvIVX(hint));
 #if A_THREADSAFE
- {
-  dMY_CXT;
-  h = ptable_fetch(MY_CXT.tbl, h);
- }
+ h = ptable_fetch(MY_CXT.tbl, h);
 #endif /* A_THREADSAFE */
 
  if (a_require_tag() != h->require_tag)
@@ -900,7 +933,7 @@ STATIC OP *a_ck_xslice(pTHX_ OP *o) {
   case OP_HSLICE:
    old_ck = a_old_ck_hslice;
    if (hint & A_HINT_DO)
-    a_recheck_rv2xv(cUNOPo->op_first->op_sibling, OP_RV2HV, a_pp_rv2hv);
+    a_recheck_rv2xv(OP_SIBLING(cUNOPo->op_first), OP_RV2HV, a_pp_rv2hv);
    break;
  }
  o = old_ck(aTHX_ o);
@@ -980,11 +1013,22 @@ STATIC void a_peep_rec(pTHX_ OP *o, ptable *seen) {
   const a_op_info *oi = NULL;
   UV flags = 0;
 
+#if !A_HAS_RPEEP
   if (ptable_fetch(seen, o))
    break;
   ptable_seen_store(seen, o, o);
+#endif
 
   switch (o->op_type) {
+#if A_HAS_RPEEP
+   case OP_NEXTSTATE:
+   case OP_DBSTATE:
+   case OP_STUB:
+    if (ptable_fetch(seen, o))
+     return;
+    ptable_seen_store(seen, o, o);
+    break;
+#endif
    case OP_PADSV:
     if (o->op_ppaddr != a_pp_deref) {
      oi = a_map_fetch(o);
@@ -1073,9 +1117,11 @@ STATIC void a_peep(pTHX_ OP *o) {
 
  a_old_peep(aTHX_ o);
 
- ptable_seen_clear(seen);
- a_peep_rec(o);
- ptable_seen_clear(seen);
+ if (seen) {
+  ptable_seen_clear(seen);
+  a_peep_rec(o);
+  ptable_seen_clear(seen);
+ }
 }
 
 /* --- Interpreter setup/teardown ------------------------------------------ */
@@ -1096,8 +1142,10 @@ STATIC void a_teardown(pTHX_ void *root) {
   dMY_CXT;
 # if A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION
   ptable_hints_free(MY_CXT.tbl);
+  MY_CXT.tbl  = NULL;
 # endif /* A_THREADSAFE && A_WORKAROUND_REQUIRE_PROPAGATION */
   ptable_seen_free(MY_CXT.seen);
+  MY_CXT.seen = NULL;
  }
 
  a_ck_restore(OP_PADANY, &a_old_ck_padany);
@@ -1222,10 +1270,11 @@ PREINIT:
  ptable *t;
 #endif
  ptable *s;
+ GV     *gv;
 PPCODE:
  {
-  dMY_CXT;
 #if A_WORKAROUND_REQUIRE_PROPAGATION
+  dMY_CXT;
   {
    a_ptable_clone_ud ud;
 
@@ -1245,7 +1294,23 @@ PPCODE:
 #endif
   MY_CXT.seen  = s;
  }
- reap(3, a_thread_cleanup, NULL);
+ gv = gv_fetchpv(__PACKAGE__ "::_THREAD_CLEANUP", 0, SVt_PVCV);
+ if (gv) {
+  CV *cv = GvCV(gv);
+  if (!PL_endav)
+   PL_endav = newAV();
+  SvREFCNT_inc(cv);
+  if (!av_store(PL_endav, av_len(PL_endav) + 1, (SV *) cv))
+   SvREFCNT_dec(cv);
+  sv_magicext((SV *) PL_endav, NULL, PERL_MAGIC_ext, &a_endav_vtbl, NULL, 0);
+ }
+ XSRETURN(0);
+
+void
+_THREAD_CLEANUP(...)
+PROTOTYPE: DISABLE
+PPCODE:
+ a_thread_cleanup(aTHX_ NULL);
  XSRETURN(0);
 
 #endif /* A_THREADSAFE */
